@@ -15,6 +15,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from . import db, ws
 from .ai_trigger import extract_tags, schedule_ai_tagged
 from .auth import AuthError, validate_token
+from .elements import normalize, strip_for_storage
 from .serializers import canvas_out, element_out
 
 log = logging.getLogger("whiteboard.wsroute")
@@ -84,6 +85,7 @@ async def _handle_add(ws_conn: WebSocket, canvas_id: str, user: dict, msg: dict)
         return
     data = msg.get("data", {}) or {}
     eid = uuid.uuid4().hex
+    data = normalize(kind, data, eid)
     el = await db.add_element(eid, canvas_id, kind, user["did"], data)
     out = element_out(el)
     await ws.broadcast(canvas_id, {"op": "add", "element": out}, exclude=ws_conn)
@@ -97,9 +99,11 @@ async def _handle_add(ws_conn: WebSocket, canvas_id: str, user: dict, msg: dict)
 async def _handle_update(ws_conn: WebSocket, canvas_id: str, user: dict, msg: dict) -> None:
     eid = msg.get("element_id", "")
     data = msg.get("data", {}) or {}
-    el = await db.update_element(eid, user["did"], data)
+    el = await db.update_element(eid, user["did"], strip_for_storage(data))
     if el is None:
-        await ws_conn.send_text(json.dumps({"op": "error", "message": "not yours or not text"}))
+        await ws_conn.send_text(
+            json.dumps({"op": "error", "message": "element not found, or it's text you don't own"})
+        )
         return
     out = element_out(el)
     await ws.broadcast(canvas_id, {"op": "update", "element": out}, exclude=ws_conn)

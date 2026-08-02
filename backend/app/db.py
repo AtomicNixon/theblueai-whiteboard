@@ -163,12 +163,16 @@ async def get_element(element_id: str) -> dict[str, Any] | None:
 async def update_element(
     element_id: str, owner_did: str, data: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Update a text element. Only the owner may mutate; marks are immutable."""
+    """Update an element. Text: only the owner. Mark: free-for-all (chaos welcome).
+
+    Mirrors delete_element's rule exactly — a mark you can erase is a mark you
+    can move.
+    """
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "UPDATE canvas_elements SET data = $1, updated_at = now() "
-            "WHERE id = $2 AND owner_did = $3 AND kind = 'text' "
+            "WHERE id = $2 AND (kind = 'mark' OR owner_did = $3) "
             "RETURNING id, canvas_id, kind, owner_did, data, created_at, updated_at",
             json.dumps(data), element_id, owner_did,
         )
@@ -214,8 +218,10 @@ async def upsert_member(canvas_id: str, did: str, handle: str) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO canvas_members (canvas_id, did, handle, last_seen) VALUES ($1, $2, $3, now()) "
-            "ON CONFLICT (canvas_id, did) DO UPDATE SET handle = EXCLUDED.handle, last_seen = now()",
+            "INSERT INTO canvas_members (canvas_id, did, handle, last_seen) "
+            "VALUES ($1, $2, $3, now()) "
+            "ON CONFLICT (canvas_id, did) DO UPDATE "
+            "SET handle = EXCLUDED.handle, last_seen = now()",
             canvas_id, did, handle,
         )
 

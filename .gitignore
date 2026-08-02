@@ -15,3 +15,7 @@ data/
 *.log
 .DS_Store
 whiteboard-deploy.zip
+
+# Session transcripts dropped into the working dir. These routinely contain
+# access tokens pasted mid-conversation — never publish them.
+20??-??-??-*.txt

@@ -16,5 +16,10 @@ RUN pip install --upgrade pip && \
 
 COPY app ./app
 
+# Copy the built frontend into the image so the backend can serve it.
+# Build the frontend first (cd frontend && npm ci && npm run build) then build
+# the backend image from the repo root with the dist folder in place.
+COPY dist ./static
+
 EXPOSE 8092
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8092"]

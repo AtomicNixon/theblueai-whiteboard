@@ -26,10 +26,23 @@ It's also a direct expression of the MANIFESTO's **Peership** value: "Art answer
   - Docker service merged into the host's existing `docker-compose.yml`, matching the PDS's networking pattern
   - Own `.env` for service-specific secrets, not stored in either memory system (same house rule as bsky-mcp's ADMIN_KEY)
 
+## Resolved since
+
+- **Shape edit/move/delete rules** (2026-08-02): **free-for-all.** Anyone can move,
+  resize or erase any mark — strokes and shapes alike. Text stays single-owner. This
+  matches the skeleton's "no conflict resolution, you see the mess" and makes the
+  update rule identical to the delete rule that was already in place: a mark you can
+  erase is a mark you can move. Enforced in `db.update_element` and mirrored in the
+  client so it doesn't send ops the server would reject.
+
+- **Element storage format** (2026-08-02): Excalidraw elements are stored **verbatim**
+  in `canvas_elements.data`. The backend never inspects them; partial elements from AI
+  agents are completed server-side by `app/elements.py`. See CHANGES.md for why the
+  previous translate-and-rebuild approach was retired.
+
 ## Still open (carried forward from the session — see full Q&A in chat history)
 
 - Per-canvas participant model: any PDS account can join, or owner-curated invite list?
-- Shape edit/move/delete rules: single-owner like text boxes, or free-for-all like strokes?
 - AI trigger priority for v1: proposed **mention/tag + direct invitation only**; defer heartbeat/standing-watch to v2. Not yet confirmed.
 - Should AI-authored strokes/text be visually marked (border/badge) or indistinguishable from human ones?
 - Scale targets: how many canvases concurrently, how many users per canvas.

@@ -39,64 +39,45 @@ async function api<T>(path: string, token: string, init?: RequestInit): Promise<
   return res.json() as Promise<T>
 }
 
+/**
+ * Fields we never send to the server.
+ *  - `locked` is computed per viewer (other users' text is locked in *your* UI),
+ *    so persisting one viewer's lock state would impose it on everyone.
+ *  - `isDeleted` — deletion is a row delete on the backend; a stored soft-delete
+ *    would be an invisible element that never goes away.
+ *  - `customData` holds {wbid, owner}, both authoritative columns on the row.
+ */
+const STRIPPED = ['locked', 'isDeleted', 'customData'] as const
+
+/**
+ * Carry the Excalidraw element verbatim.
+ *
+ * We deliberately do NOT project it onto a schema of our own. Excalidraw's
+ * serialized element format is stable and public; decomposing it and rebuilding
+ * it on the way back is what silently dropped `simulatePressure` (zero-width
+ * freehand strokes) and pinned every element to `seed: 1`. The backend only
+ * needs `kind` to enforce ownership — it never looks inside `data`.
+ */
 function excToBackend(el: ExcalidrawElement): { kind: 'text' | 'mark'; data: Record<string, unknown> } {
-  const common = {
-    exid: el.id,
-    x: el.x, y: el.y, width: el.width, height: el.height,
-    angle: el.angle, strokeColor: el.strokeColor, backgroundColor: el.backgroundColor,
-    strokeWidth: el.strokeWidth, opacity: el.opacity,
-  }
-  if (el.type === 'text') {
-    return { kind: 'text', data: { ...common, text: el.text, fontSize: el.fontSize } }
-  }
-  // All non-text elements (freedraw, line, rectangle, ellipse, arrow, diamond)
-  // are marks: append-only, free-for-all.
-  return {
-    kind: 'mark',
-    data: { ...common, type: el.type, points: (el as any).points },
-  }
+  const data = { ...el } as Record<string, unknown>
+  for (const k of STRIPPED) delete data[k]
+  // Text is single-owner and mutable by its owner. Everything else — freedraw,
+  // line, rectangle, ellipse, arrow, diamond — is a mark: append-only,
+  // free-for-all.
+  return { kind: el.type === 'text' ? 'text' : 'mark', data }
 }
 
+/** Re-attach the per-viewer and authoritative fields stripped on the way up. */
 function backendToExc(el: ElementOut, me?: string): ExcalidrawElement {
-  const d = el.data
-  const isText = el.kind === 'text'
-  const base = {
-    id: (d.exid as string) ?? el.id,
-    x: (d.x as number) ?? 0,
-    y: (d.y as number) ?? 0,
-    width: (d.width as number) ?? 100,
-    height: (d.height as number) ?? 100,
-    angle: (d.angle as number) ?? 0,
-    strokeColor: (d.strokeColor as string) ?? '#1e1e1e',
-    backgroundColor: (d.backgroundColor as string) ?? 'transparent',
-    fillStyle: 'hachure',
-    strokeWidth: (d.strokeWidth as number) ?? 1,
-    strokeStyle: 'solid',
-    roughness: 1,
-    opacity: (d.opacity as number) ?? 100,
-    groupIds: [],
-    frameId: null,
-    roundness: null,
-    seed: 1,
-    version: 1,
-    versionNonce: 1,
+  return {
+    ...el.data,
     isDeleted: false,
-    boundElements: null,
-    updated: Date.now(),
-    link: null,
     // Lock other users' text so only the owner can drag/edit it (matches the
-    // backend rule that text is owner-mutable). Marks stay unlocked so anyone
-    // can still erase them.
-    locked: isText && !!me && el.owner_did !== me,
+    // backend rule that text is owner-mutable). Marks stay unlocked for
+    // everyone — anyone can move, resize or erase any stroke or shape.
+    locked: el.kind === 'text' && !!me && el.owner_did !== me,
     customData: { wbid: el.id, owner: el.owner_did },
-  } as any
-  if (isText) {
-    return { ...base, type: 'text', text: (d.text as string) ?? '', fontSize: (d.fontSize as number) ?? 20,
-      fontFamily: 1, textAlign: 'left', verticalAlign: 'top', baseline: 18, containerId: null,
-      originalText: (d.text as string) ?? '', lineHeight: 1.25 }
-  }
-  return { ...base, type: (d.type as string) ?? 'freedraw', points: (d.points as [number, number][]) ?? [[0, 0]],
-    lastCommittedPoint: null, pressures: [] as number[] } as ExcalidrawElement
+  } as unknown as ExcalidrawElement
 }
 
 // Minimal surface of the Excalidraw imperative API we use.
@@ -192,15 +173,15 @@ export default function CanvasView({
     const api = excalidrawAPIRef.current
     if (!api) return
     const scene = api.getSceneElements()
-    let changed = false
-    for (const e of scene) {
-      if (e.id === exid) {
-        ;(e as any).customData = { wbid, owner }
-        changed = true
-        break
-      }
-    }
-    if (changed) applyScene(scene)
+    const idx = scene.findIndex((e) => e.id === exid)
+    if (idx < 0) return
+    // Replace with a fresh object rather than mutating in place. updateScene
+    // reconciles by version/versionNonce, and an in-place `customData` change
+    // bumps neither — so the mutation could be silently discarded, leaving the
+    // element without its wbid and making every later edit look like a create.
+    const next = scene.slice()
+    next[idx] = { ...scene[idx], customData: { wbid, owner } } as ExcalidrawElement
+    applyScene(next)
   }
 
   function handleChange(next: readonly ExcalidrawElement[]) {
@@ -224,8 +205,13 @@ export default function CanvasView({
         continue
       }
       if (el.versionNonce !== info.v) {
-        // Local edit. Text is owner-mutable; marks are append-only.
-        if (wbid && el.type === 'text' && (el as any).customData?.owner === myDidRef.current) {
+        // Local edit. Text is owner-mutable — someone else's text box is yours
+        // to read, not to move. Marks are free-for-all: anyone can drag, resize
+        // or erase any stroke or shape. Chaos is a feature (whiteboard_skeleton.md).
+        // The backend enforces the same split; this just avoids sending ops it
+        // would reject.
+        const mine = (el as any).customData?.owner === myDidRef.current
+        if (wbid && (el.type !== 'text' || mine)) {
           pend.updates.set(wbid, el)
         }
         knownRef.current.set(el.id, { v: el.versionNonce, wbid })

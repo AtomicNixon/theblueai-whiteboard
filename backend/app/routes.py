@@ -11,6 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from . import db, ws
 from .ai_trigger import extract_tags, schedule_ai_tagged
 from .auth import AuthError, validate_token
+from .elements import normalize, strip_for_storage
 from .models import CanvasCreate, ElementIn, ElementUpdate
 from .serializers import canvas_out, element_out
 
@@ -103,7 +104,10 @@ async def add_element(user: UserDep, canvas_id: str, body: ElementIn) -> dict:
     if c["status"] != "active":
         raise HTTPException(409, "canvas is archived")
     eid = uuid.uuid4().hex
-    el = await db.add_element(eid, canvas_id, body.kind, user["did"], body.data)
+    # Browser clients post a complete Excalidraw element and pass through
+    # untouched; AI clients post {text, x, y} and get completed here.
+    data = normalize(body.kind, body.data, eid)
+    el = await db.add_element(eid, canvas_id, body.kind, user["did"], data)
 
     # AI trigger seam: if a text element tags an AI, fire the (stub) wake in
     # the background so this response isn't blocked by the mention post.
@@ -119,10 +123,11 @@ async def add_element(user: UserDep, canvas_id: str, body: ElementIn) -> dict:
 
 @router.patch("/elements/{element_id}")
 async def update_element(user: UserDep, element_id: str, body: ElementUpdate) -> dict:
-    # update_element enforces owner-only + kind=text at the DB layer.
-    el = await db.update_element(element_id, user["did"], body.data)
+    # update_element enforces the ownership split at the DB layer: text is
+    # owner-only, marks are free-for-all.
+    el = await db.update_element(element_id, user["did"], strip_for_storage(body.data))
     if el is None:
-        raise HTTPException(403, "element not found or not yours to edit")
+        raise HTTPException(403, "element not found, or it's text you don't own")
     out = element_out(el)
     await ws.broadcast(el["canvas_id"], {"op": "update", "element": out})
     return out

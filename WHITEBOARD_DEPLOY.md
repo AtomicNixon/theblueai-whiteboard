@@ -166,8 +166,8 @@ docker run -d \
 docker logs whiteboard-backend
 # Should show: "Uvicorn running on 0.0.0.0:8000"
 
-curl http://localhost:8001/health
-# Should return: {"status": "ok"}
+curl http://localhost:8001/healthz
+# Should return: {"ok": true, "version": "0.1.0"}
 ```
 
 ---
@@ -224,8 +224,8 @@ caddy reload -config /etc/caddy/Caddyfile
 **Verify:**
 
 ```bash
-curl https://whiteboard.theblueai.org/health
-# Should return: {"status": "ok"}
+curl https://whiteboard.theblueai.org/healthz
+# Should return: {"ok": true, "version": "0.1.0"}
 ```
 
 ---

@@ -40,10 +40,15 @@ class ElementOut(BaseModel):
 class SnapshotOut(BaseModel):
     canvas: CanvasOut
     elements: list[ElementOut]
+    me: str
 
 
 class WsOp(BaseModel):
     """Live op broadcast to connected clients."""
-    op: Literal["add", "update", "delete"]
+    op: Literal["snapshot", "add", "update", "delete", "error"]
+    canvas: CanvasOut | None = None
+    elements: list[ElementOut] | None = None
+    me: str | None = None
     element: ElementOut | None = None
     element_id: str | None = None
+    message: str | None = None
