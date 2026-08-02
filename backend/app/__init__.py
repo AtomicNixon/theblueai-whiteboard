@@ -1,0 +1,1 @@
+"""Whiteboard backend application package."""

@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+*.tsbuildinfo
+data/
+*.log
+.DS_Store
+whiteboard-deploy.zip

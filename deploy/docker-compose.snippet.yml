@@ -1,0 +1,13 @@
+# Merge into the PDS host's existing docker-compose.yml.
+services:
+  whiteboard-backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: /opt/whiteboard/.env
+    environment:
+      WB_PG_HOST: 127.0.0.1
+    volumes:
+      - /opt/whiteboard/.env:/app/.env:ro
+    network_mode: host
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
