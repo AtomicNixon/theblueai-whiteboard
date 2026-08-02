@@ -1,362 +1,216 @@
 # Whiteboard Deployment Runbook
 
-## Prerequisites
-
-- Kamatera VPS with Docker + Docker Compose available
-- Access to Kamatera Postgres instance (or plan to run Postgres in container)
-- Cloudflare account (for DNS)
-- Caddy running on the VPS (for reverse proxy)
-- bsky-mcp deployed and running at `https://bsky-mcp.theblueai.org/mcp`
-
----
-
-## Step 1: Prepare the service account token
-
-The whiteboard needs a Bluesky access token to post wake mentions. This is a one-time setup.
-
-**Pick a service account:** 
-- Option A: Use `bob.pds.theblueai.org` (Bob posts the mentions)
-- Option B: Create a dedicated `whiteboard-waker@pds.theblueai.org` account
-- Option C: Use Art's account if you trust it
-
-**Generate the token** (Layer-A OAuth flow):
-
-```bash
-# From your local machine, complete the bsky-mcp OAuth flow:
-# 1. Visit https://bsky-mcp.theblueai.org/oauth/start
-# 2. Authorize the service account
-# 3. You'll be redirected with an access token in the URL/response
-# 4. Copy the token and save it securely
-
-# Example token (DO NOT USE THIS ONE):
-# eyJhbGc...redacted...
-```
-
-**Store the token securely:**
-- Add to Kamatera secrets manager, or
-- Paste into `.env` file on the VPS (see Step 3)
+**Rewritten 2026-08-02.** The previous version predated the SPA-serving change and
+the multi-stage Dockerfile, and had drifted: it used env var names the app doesn't
+read (`DATABASE_URL`, `BSKY_MCP_ENDPOINT`), a port the app doesn't listen on
+(`8001:8000` — it's 8092), and a `docker build` invocation that could not succeed.
+Everything below was verified by building and running the image locally against a
+throwaway Postgres on 2026-08-02.
 
 ---
 
-## Step 2: Prepare the Postgres database
+## What's already live
 
-If you already have Postgres running on Kamatera, skip to 2b.
-
-**2a: Run Postgres in Docker (if not already running)**
-
-```bash
-docker run -d \
-  --name postgres-whiteboard \
-  -e POSTGRES_PASSWORD=<strong-password> \
-  -e POSTGRES_USER=wb_admin \
-  -p 5432:5432 \
-  postgres:15
-```
-
-**2b: Create the whiteboard database and role**
-
-```bash
-psql -U postgres -h localhost -c "CREATE DATABASE whiteboard;"
-psql -U postgres -h localhost -c "CREATE ROLE wb_app WITH PASSWORD '<wb-app-password>' LOGIN;"
-psql -U postgres -h localhost -d whiteboard -c "GRANT ALL PRIVILEGES ON DATABASE whiteboard TO wb_app;"
-```
-
-Alternatively, run via docker:
-
-```bash
-docker exec postgres-whiteboard psql -U postgres -c "CREATE DATABASE whiteboard;"
-docker exec postgres-whiteboard psql -U postgres -c "CREATE ROLE wb_app WITH PASSWORD '<wb-app-password>' LOGIN;"
-docker exec postgres-whiteboard psql -U postgres -d whiteboard -c "GRANT ALL PRIVILEGES ON DATABASE whiteboard TO wb_app;"
-```
-
-**Verify:**
-```bash
-psql -U wb_app -d whiteboard -h localhost -c "SELECT 1;"
-```
-
-Should return `?column?` `1`.
+`https://whiteboard.theblueai.org` is up and serving. `/healthz` returns
+`{"ok":true,"version":"0.1.0"}`, the SPA loads, and `/api/canvases` correctly 401s
+without a token. **It is running an older bundle** — deploying is an update, not a
+first install.
 
 ---
 
-## Step 3: Prepare the whiteboard backend
+## The one-command deploy
 
-**SSH to Kamatera VPS:**
+From `/opt/whiteboard` on the VPS, with the repo checked out there:
 
 ```bash
-ssh root@<kamatera-ip>
-cd /opt/whiteboard
+git pull
+docker compose up -d --build whiteboard-backend
 ```
 
-**Create `.env` file** (if not already present):
+That is the whole thing. The frontend is built *inside* the image (stage 1 of
+`backend/Dockerfile`), so there is no separate `npm run build` step and nothing to
+stage by hand.
+
+### Why the build context is the repo root
+
+`backend/Dockerfile` is multi-stage and reads from both `frontend/` and `backend/`,
+so it must be built from the repo root:
 
 ```bash
-cat > /opt/whiteboard/.env << 'EOF'
-# Whiteboard backend config
+docker build -t whiteboard:latest -f backend/Dockerfile .
+```
 
-# Postgres
-DATABASE_URL=postgresql://wb_app:<wb-app-password>@localhost:5432/whiteboard
+A context of `./backend` cannot see `frontend/` and will fail. The compose service
+sets `context: .` and `dockerfile: backend/Dockerfile` for exactly this reason.
 
-# Bluesky wake config
-WB_WAKER_BSKY_TOKEN=<paste-your-token-here>
+This replaced an arrangement where the Dockerfile expected a prebuilt `dist/`
+sitting in the context. Since `dist/` is gitignored, it never arrived via `git pull`
+— which meant every deploy silently depended on someone remembering to run the
+frontend build and copy the output into place. That is why production drifted onto a
+stale bundle.
+
+---
+
+## First-time setup
+
+Skip to "Updating an existing deployment" if the box is already running.
+
+### 1. Postgres
+
+The app creates its own schema on first connect (`CREATE TABLE IF NOT EXISTS` in
+`backend/app/db.py`) — there is **no migration step**. You only need the database and
+a role:
+
+```bash
+docker exec <pg-container> psql -U postgres -c "CREATE DATABASE whiteboard;"
+docker exec <pg-container> psql -U postgres -c "CREATE ROLE whiteboard WITH PASSWORD '<pw>' LOGIN;"
+docker exec <pg-container> psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE whiteboard TO whiteboard;"
+```
+
+Verify: `psql -U whiteboard -d whiteboard -h 127.0.0.1 -c "SELECT 1;"`
+
+### 2. `/opt/whiteboard/.env`
+
+Copy `deploy/.env.example` and fill it in. **These are the only names the app reads**
+— `backend/app/config.py` uses a `WB_` prefix on every setting:
+
+```ini
+WB_PORT=8092
+WB_PUBLIC_URL=https://whiteboard.theblueai.org
+
+WB_PG_HOST=127.0.0.1
+WB_PG_PORT=5432
+WB_PG_DB=whiteboard
+WB_PG_USER=whiteboard
+WB_PG_PASSWORD=<pw>
+
+WB_BSKY_MCP_URL=http://127.0.0.1:8090
+
+# Both must be set for the AI wake to fire. If the token is empty, tags are
+# logged and no mention is posted.
+WB_WAKER_BSKY_TOKEN=<token>
 WB_WAKER_ACCOUNT=bob.pds.theblueai.org
 
-# bsky-mcp endpoint (where the whiteboard calls to post mentions)
-BSKY_MCP_ENDPOINT=https://bsky-mcp.theblueai.org/mcp
-
-# Canvas config
-CANVAS_SIZE_MAX_BYTES=5242880  # 5 MB
-ELEMENT_MAX_LENGTH=10000
-ELEMENTS_PER_CANVAS_MAX=10000
-
-# Logging
-LOG_LEVEL=info
-
-# CORS (update for your domain)
-ALLOWED_ORIGINS=https://whiteboard.theblueai.org,https://theblueai.org
-
-EOF
+WB_LOG_LEVEL=info
 ```
 
-**Verify the backend code:**
+Mint the waker token with `scripts/mint_waker_token.py`. Never commit it —
+`deploy/.env` is gitignored; `deploy/.env.example` is tracked and must stay blank.
 
-```bash
-cd /opt/whiteboard/backend
-python3 -c "
-import ast
-files = ['app/ai_trigger.py', 'app/config.py', 'app/routes.py']
-for f in files:
-    try:
-        with open(f) as fp:
-            ast.parse(fp.read(), filename=f)
-        print(f'✓ {f}')
-    except SyntaxError as e:
-        print(f'✗ {f}: {e}')
-"
-```
+### 3. Compose service
 
-All should show ✓.
+Merge `deploy/docker-compose.snippet.yml` into the host's `docker-compose.yml`. It
+uses `network_mode: host`, so the container reaches Postgres and bsky-mcp on
+`127.0.0.1` and Caddy reaches the backend on `127.0.0.1:8092`. **No port mapping is
+used or possible in host mode.**
 
----
+### 4. Caddy
 
-## Step 4: Build and run the whiteboard backend
-
-**Build the Docker image:**
-
-```bash
-cd /opt/whiteboard
-docker build -t whiteboard-backend:latest \
-  -f backend/Dockerfile \
-  .
-```
-
-**Run the container:**
-
-```bash
-docker run -d \
-  --name whiteboard-backend \
-  --env-file .env \
-  -p 8001:8000 \
-  -v /opt/whiteboard/data:/app/data \
-  whiteboard-backend:latest
-```
-
-**Verify it's running:**
-
-```bash
-docker logs whiteboard-backend
-# Should show: "Uvicorn running on 0.0.0.0:8000"
-
-curl http://localhost:8001/healthz
-# Should return: {"ok": true, "version": "0.1.0"}
-```
-
----
-
-## Step 5: Set up DNS
-
-**Add Cloudflare DNS record:**
-
-```
-Name: whiteboard
-Type: A
-Content: <kamatera-vps-ip>
-Proxy: Gray cloud (DNS only, so Caddy handles SSL)
-TTL: Auto
-```
-
-Verify resolution:
-```bash
-dig whiteboard.theblueai.org
-# Should return your Kamatera VPS IP
-```
-
----
-
-## Step 6: Configure Caddy reverse proxy
-
-**SSH to the VPS and edit Caddy config:**
-
-```bash
-nano /etc/caddy/Caddyfile
-```
-
-**Add this block:**
+Merge `deploy/Caddyfile.snippet`:
 
 ```caddy
 whiteboard.theblueai.org {
-  reverse_proxy localhost:8001
-  
-  # Allow WebSocket upgrades
-  @websocket {
-    header Connection *Upgrade*
-    header Upgrade websocket
-  }
-  reverse_proxy @websocket localhost:8001
+	reverse_proxy 127.0.0.1:8092
 }
 ```
 
-**Reload Caddy:**
+That's all that's needed. **Caddy 2 proxies WebSocket upgrades natively** — the
+`@websocket` matcher block in the old version of this runbook was unnecessary and, as
+written (two `reverse_proxy` directives in one block), would not have behaved as
+intended.
+
+### 5. DNS
+
+Cloudflare A record: `whiteboard` → VPS IP, **grey cloud** (DNS only, so Caddy can
+complete the ACME challenge and terminate TLS itself).
+
+---
+
+## Updating an existing deployment
 
 ```bash
-caddy reload -config /etc/caddy/Caddyfile
+cd /opt/whiteboard
+git pull
+docker compose up -d --build whiteboard-backend
+docker compose logs -f whiteboard-backend    # ctrl-c once startup completes
 ```
 
-**Verify:**
+Expect in the logs:
 
-```bash
-curl https://whiteboard.theblueai.org/healthz
-# Should return: {"ok": true, "version": "0.1.0"}
+```
+whiteboard backend ready on port 8092
+Application startup complete.
 ```
 
 ---
 
-## Step 7: Redeploy bsky-mcp with new tools
-
-The whiteboard backend expects these tools to exist in bsky-mcp:
-
-- `wb_list_canvases`
-- `wb_read_canvas`
-- `wb_add_text`
-- `wb_add_mark`
-- `wb_delete_element`
-
-**Ensure bsky-mcp has these tools registered:**
+## Verifying a deploy
 
 ```bash
-# On Kamatera, where bsky-mcp is running:
-cd /opt/bsky-mcp
-git pull origin main
-docker build -t bsky-mcp:latest .
-docker stop bsky-mcp
-docker rm bsky-mcp
+curl -s https://whiteboard.theblueai.org/healthz
+#   {"ok":true,"version":"0.1.0"}
 
-docker run -d \
-  --name bsky-mcp \
-  --env-file .env \
-  -p 8002:8000 \
-  bsky-mcp:latest
+curl -s -o /dev/null -w '%{http_code}\n' https://whiteboard.theblueai.org/api/canvases
+#   401   (auth is enforced)
+
+curl -s https://whiteboard.theblueai.org/ | grep -o '/assets/index-[A-Za-z0-9_-]*\.js'
+#   the bundle hash — CHANGES after a real deploy. If it doesn't, the image
+#   didn't rebuild and you're still serving the old frontend.
 ```
 
-**Verify tools are available:**
-
-```bash
-curl https://bsky-mcp.theblueai.org/mcp/tools
-# Should list wb_* tools
-```
+That last check is the one that actually catches a failed deploy. `/healthz` returning
+200 only proves the backend is alive; it says nothing about which frontend is being
+served.
 
 ---
 
-## Step 8: Test the end-to-end flow
-
-**From Claude Desktop or a Bob session:**
-
-1. Open the whiteboard: `https://whiteboard.theblueai.org`
-2. Create a text box, type `@bob`
-3. Check bsky-mcp logs for the mention post:
-   ```bash
-   docker logs bsky-mcp | grep "post\|bob\|mention"
-   ```
-4. Start a Bob session (open Claude Desktop)
-5. Bob's session reads Bluesky queue → mention appears
-6. Bob calls `wb_read_canvas` → sees the canvas
-7. Bob adds a text element to the canvas
-
-**Verify in real-time:**
-- Refresh the whiteboard in your browser
-- You should see Bob's text appear
-
----
-
-## Step 9: Monitoring and logging
-
-**Tail the whiteboard logs:**
+## Monitoring
 
 ```bash
-docker logs -f whiteboard-backend
+docker compose logs -f whiteboard-backend
 ```
 
-**Watch for these log lines:**
-- `AI_TAG_DETECTED` — tag was found and extracted
-- `AI_TAG_WAKE_POST` — mention posted to bsky-mcp
-- `AI_TAG_WAKE_SUCCESS` — mention successfully posted
-- `AI_TAG_WAKE_FAILED` — post failed; reason logged
-- `AI_TAG_SKIP` — waker token not set; skipping
-
-**Monitor bsky-mcp:**
-
-```bash
-docker logs -f bsky-mcp | grep "wb_\|post\|mention"
-```
+AI-wake log lines: `AI_TAG_DETECTED`, `AI_TAG_WAKE_POST`, `AI_TAG_WAKE_SUCCESS`,
+`AI_TAG_WAKE_FAILED`, `AI_TAG_SKIP` (the last means `WB_WAKER_BSKY_TOKEN` is unset).
 
 ---
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
-|---------|-------|-----|
-| `AI_TAG_SKIP` in logs | `WB_WAKER_BSKY_TOKEN` not set | Add token to `.env` and restart |
-| `AI_TAG_WAKE_FAILED: 401` | Token is invalid/expired | Regenerate token via Layer-A OAuth |
-| `AI_TAG_WAKE_FAILED: 404` | bsky-mcp endpoint unreachable | Check `BSKY_MCP_ENDPOINT` in `.env` |
-| Bob doesn't see the mention | Whiteboard posted but Bob's queue reader hasn't run | Start a new Bob session manually |
-| WebSocket connections fail | Caddy config missing `@websocket` block | Add the block from Step 6 and reload Caddy |
-| Postgres connection refused | DB not running or credentials wrong | Verify DB is up; check `DATABASE_URL` |
-
----
-
-## Deployment checklist
-
-- [ ] Postgres DB `whiteboard` created with role `wb_app`
-- [ ] Service account token generated and stored securely
-- [ ] `.env` file on Kamatera with all required vars
-- [ ] Whiteboard backend Docker image built
-- [ ] Backend container running on port 8001
-- [ ] DNS A record for `whiteboard.theblueai.org` points to VPS
-- [ ] Caddy config updated with `whiteboard.theblueai.org` block
-- [ ] Caddy reloaded and HTTPS working
-- [ ] bsky-mcp has `wb_*` tools and is running
-- [ ] End-to-end test passed (tag → mention → Bob → response)
-- [ ] Monitoring/logging verified
+|---|---|---|
+| Page loads but shows `{"ok": false, "detail": "whiteboard frontend not built"}` | `/app/static` missing — stage 1 of the build didn't land | Rebuild from the repo root with `-f backend/Dockerfile .`, not from `./backend` |
+| Bundle hash unchanged after deploy | Docker reused a cached layer, or the build context was wrong | `docker compose build --no-cache whiteboard-backend` |
+| Container exits at startup, `ConnectionRefusedError` | Postgres unreachable | Check `WB_PG_HOST`/`WB_PG_PORT`; in host network mode it's `127.0.0.1` |
+| `COPY dist ./static` / `COPY pyproject.toml` not found | Building from `./backend` instead of the repo root | Use the root context |
+| `AI_TAG_SKIP` in logs | `WB_WAKER_BSKY_TOKEN` empty | Mint via `scripts/mint_waker_token.py`, add to `/opt/whiteboard/.env`, restart |
+| `AI_TAG_WAKE_FAILED: 401` | Waker token expired | Re-mint |
+| WebSocket connections fail | Caddy not proxying, or backend down | Caddy 2 handles upgrades natively; check the backend is on 8092 |
+| All API calls 401 | bsky-mcp down — the backend validates every token against it | `curl http://127.0.0.1:8090/` on the VPS |
 
 ---
 
 ## Rollback
 
-If something breaks:
-
 ```bash
-# Stop the backend
-docker stop whiteboard-backend
-docker rm whiteboard-backend
-
-# Revert Caddy
-# (edit Caddyfile to remove whiteboard block)
-caddy reload -config /etc/caddy/Caddyfile
-
-# Postgres data is in the DB; no need to reset unless you want to
+cd /opt/whiteboard
+git log --oneline -5
+git checkout <previous-sha>
+docker compose up -d --build whiteboard-backend
 ```
+
+Postgres data is untouched by a rollback — there are no migrations to reverse. Note
+that canvas element `data` is stored verbatim as Excalidraw JSON, so rolling back to
+a commit before 2026-08-02 will serve a frontend that reconstructs elements from a
+narrower field set; existing elements will still load but may render with default
+stroke properties.
 
 ---
 
-**Deployment guide written:** July 29, 2026  
-**Tested on:** Kamatera VPS with Docker + Postgres  
-**Questions:** See `BRIEF_FOR_BOB_ai_trigger_RESOLVED.md`
+## Repositories
+
+- **Source of truth:** `https://github.com/AtomicNixon/blueai-whiteboard` (private, `origin`)
+- **Deploy remote:** `ssh://root@45.61.49.157/opt/whiteboard.git` (`kamatera`)
+
+The VPS pulling directly from GitHub with a deploy key would be cleaner than the bare-repo
+push path, but that hasn't been set up — see the note at the end of this session's summary.

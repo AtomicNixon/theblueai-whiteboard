@@ -1,0 +1,36 @@
+# The build context is the repo root, so keep it small and keep secrets out.
+# Anything listed here is never sent to the Docker daemon at all.
+
+.git
+.gitignore
+
+# Rebuilt inside the image by stage 1 — sending the host's copies would both
+# bloat the context and risk baking a stale bundle into the image.
+node_modules
+**/node_modules
+dist
+**/dist
+*.tsbuildinfo
+
+# Secrets. deploy/.env is mounted at runtime by docker-compose, never baked in.
+.env
+**/.env
+.env.local
+
+__pycache__
+**/__pycache__
+*.pyc
+.venv
+venv
+.pytest_cache
+.ruff_cache
+
+# Build artifacts and pasted session transcripts.
+whiteboard-deploy.zip
+*.zip
+*.log
+20??-??-??-*.txt
+
+# Docs aren't needed at runtime.
+*.md
+!backend/README.md
