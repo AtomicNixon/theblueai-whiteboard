@@ -5,9 +5,9 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db, routes, ws_routes
@@ -51,6 +51,15 @@ async def healthz() -> dict:
 app.include_router(routes.router, prefix="/api")
 app.include_router(ws_routes.router)
 
+# Paths that belong to the backend API surface. An unmatched path under one of
+# these is a bug in the caller, not a client-side route, and must 404 as JSON —
+# never fall through to the SPA. Before this guard existed, GET /api/typo
+# returned index.html with status 200, so a client checking `res.ok` saw success
+# and then failed parsing HTML as JSON. That is a genuinely awful thing to debug
+# from inside an MCP tool.
+_API_PREFIXES = ("api/", "ws/", "healthz")
+
+
 # Serve the built React + Excalidraw frontend for any path that isn't an API or
 # WebSocket route.  index.html is returned for unknown paths so client-side
 # routing (React Router, if we add it) keeps working.
@@ -59,9 +68,17 @@ if os.path.isdir(_STATIC_DIR):
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        # API/WebSocket are handled by the routers above; this only catches
-        # unmatched paths.  Always serve index.html so the React app boots.
+        # The routers above claim the real API/WS routes; anything under an API
+        # prefix that reaches here is an unknown endpoint.
+        if full_path.startswith(_API_PREFIXES):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such endpoint: /{full_path}")
+
         index_path = os.path.join(_STATIC_DIR, "index.html")
         if os.path.isfile(index_path):
             return FileResponse(index_path)
-        return {"ok": False, "detail": "whiteboard frontend not built"}
+        # Signals that stage 1 of the Docker build didn't land. 503 rather than
+        # 200 so a health probe or a deploy check can actually see it.
+        return JSONResponse(
+            {"ok": False, "detail": "whiteboard frontend not built"},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )

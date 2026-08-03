@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  backend:
+    name: backend — lint, tests
+    runs-on: ubuntu-latest
+
+    # The integration tests need a real Postgres: the thing under test is that
+    # an Excalidraw element survives JSONB byte-identical, which a mock cannot
+    # demonstrate. conftest normally starts its own container; in CI we hand it
+    # a service instead and point WB_PG_* at it.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: whiteboard
+          POSTGRES_PASSWORD: wbtestpw
+          POSTGRES_DB: whiteboard
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U whiteboard -d whiteboard"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff
+        working-directory: backend
+        run: ruff check app/ tests/
+
+      - name: Tests
+        working-directory: backend
+        env:
+          WB_TEST_PG_PORT: '5432'
+        run: python -m pytest tests/ -v
+
+  frontend:
+    name: frontend — typecheck, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      # `npm run build` is `tsc -b && vite build`, so this is the typecheck too.
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  image:
+    name: docker image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Guards the build-context contract. backend/Dockerfile is multi-stage and
+      # must be built from the repo ROOT — a context of ./backend cannot see
+      # frontend/ and silently broke deploys for weeks.
+      - name: Build image from repo root
+        run: docker build -t whiteboard:ci -f backend/Dockerfile .
+
+      - name: Frontend actually landed in the image
+        run: |
+          docker run --rm --entrypoint sh whiteboard:ci -c '
+            test -f /app/static/index.html || { echo "index.html missing from image"; exit 1; }
+            ls /app/static/assets/ | grep -qE "^index-.*\.js$" || { echo "no bundle in image"; exit 1; }
+            echo "frontend present in image"
+          '
+
+  compose:
+    name: compose config valid
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # docker-compose.yml was untracked on the VPS and rotted into invalid
+      # YAML unnoticed. Now that it's tracked, keep it parseable.
+      - name: Validate
+        run: |
+          printf 'WB_PG_PASSWORD=ci\n' > .env
+          docker compose config --quiet
+          echo "compose config valid"

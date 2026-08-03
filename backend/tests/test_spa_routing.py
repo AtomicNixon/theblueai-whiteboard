@@ -1,0 +1,123 @@
+"""SPA fallback routing and the API 404 guard.
+
+Context: Caddy used to file_server the frontend and proxy only /api/*, /healthz
+and /ws/* to the backend. Once it was reduced to a single reverse_proxy (so the
+container's own frontend is served, and deploys actually ship it), the backend's
+SPA catch-all became reachable for *every* path — including mistyped API ones.
+
+GET /api/typo then returned index.html with status 200. A client checking
+`res.ok` saw success and blew up parsing HTML as JSON. These tests pin the
+corrected behavior.
+
+No database needed: TestClient is used without its context manager, so the
+lifespan (and therefore db.init_pool) never runs.
+"""
+from __future__ import annotations
+
+import importlib
+import os
+import sys
+
+import pytest
+from starlette.testclient import TestClient
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+INDEX_HTML = (
+    '<!doctype html><html><head><title>Whiteboard</title>'
+    '<script type="module" src="/assets/index-TEST1234.js"></script></head>'
+    '<body><div id="root"></div></body></html>'
+)
+
+
+@pytest.fixture
+def spa_client(tmp_path, monkeypatch):
+    """An app instance with a populated static dir, restored afterwards."""
+    static = tmp_path / "static"
+    (static / "assets").mkdir(parents=True)
+    (static / "index.html").write_text(INDEX_HTML, encoding="utf-8")
+    (static / "assets" / "index-TEST1234.js").write_text("console.log(1)", encoding="utf-8")
+
+    monkeypatch.setenv("WB_STATIC_DIR", str(static))
+    import app.main as main
+    importlib.reload(main)
+    try:
+        yield TestClient(main.app)
+    finally:
+        # Restore the no-static-dir app so session fixtures elsewhere are
+        # unaffected by the reload.
+        monkeypatch.setenv("WB_STATIC_DIR", "/nonexistent-static-dir-for-tests")
+        importlib.reload(main)
+
+
+@pytest.fixture
+def nostatic_client(monkeypatch):
+    """An app instance whose static dir is absent — i.e. an unbuilt frontend."""
+    monkeypatch.setenv("WB_STATIC_DIR", "/nonexistent-static-dir-for-tests")
+    import app.main as main
+    importlib.reload(main)
+    yield TestClient(main.app)
+
+
+# --- the guard -------------------------------------------------------------
+
+@pytest.mark.parametrize("path", [
+    "/api/nonexistent",
+    "/api/v9/whatever",
+    "/api/canvases/abc/bogus",
+    "/ws/typo",
+])
+def test_unknown_api_paths_404_as_json(spa_client, path):
+    r = spa_client.get(path)
+    assert r.status_code == 404, f"{path} must not fall through to the SPA"
+    assert r.headers["content-type"].startswith("application/json")
+    assert "no such endpoint" in r.json()["detail"]
+
+
+def test_unknown_api_path_does_not_return_html(spa_client):
+    """The specific production symptom: 200 + HTML body on a bogus API path."""
+    r = spa_client.get("/api/nonexistent")
+    assert "<!doctype html" not in r.text.lower()
+    assert r.status_code != 200
+
+
+# --- the SPA fallback still works -----------------------------------------
+
+@pytest.mark.parametrize("path", ["/", "/canvas/abc123", "/some/deep/client/route"])
+def test_spa_routes_serve_index(spa_client, path):
+    r = spa_client.get(path)
+    assert r.status_code == 200
+    assert '<div id="root">' in r.text
+
+
+def test_assets_are_served(spa_client):
+    r = spa_client.get("/assets/index-TEST1234.js")
+    assert r.status_code == 200
+    assert r.text == "console.log(1)"
+
+
+def test_healthz_still_wins_over_catchall(spa_client):
+    r = spa_client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "version": "0.1.0"}
+
+
+# --- unbuilt frontend ------------------------------------------------------
+
+def test_missing_frontend_reports_503_not_200(nostatic_client):
+    """A deploy check must be able to see that stage 1 of the build didn't land.
+
+    With no static dir the catch-all isn't registered at all, so an unknown path
+    404s. Either way the contract holds: never a 200 claiming success.
+    """
+    r = nostatic_client.get("/")
+    assert r.status_code in (404, 503), "an unbuilt frontend must not look healthy"
+    assert r.status_code != 200
+
+
+def test_api_still_reachable_without_frontend(nostatic_client):
+    """The API must work even if the frontend build is missing."""
+    r = nostatic_client.get("/healthz")
+    assert r.status_code == 200
+    r = nostatic_client.get("/api/canvases")
+    assert r.status_code == 401, "no token -> 401, not a crash"

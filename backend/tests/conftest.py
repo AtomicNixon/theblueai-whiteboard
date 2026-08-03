@@ -53,9 +53,19 @@ def _docker_available() -> bool:
 
 @pytest.fixture(scope="session")
 def pg_port() -> int:
-    """A throwaway Postgres. Torn down at session end, data discarded."""
+    """A Postgres to test against.
+
+    If WB_TEST_PG_PORT is set we use that database and manage nothing — this is
+    how CI runs, against a `services:` container that's already healthy. Locally
+    we start a throwaway container and tear it down at session end.
+    """
+    external = os.environ.get("WB_TEST_PG_PORT")
+    if external:
+        yield int(external)
+        return
+
     if not _docker_available():
-        pytest.skip("docker unavailable — skipping integration tests")
+        pytest.skip("docker unavailable and WB_TEST_PG_PORT unset — skipping integration tests")
 
     port = _free_port()
     subprocess.run(["docker", "rm", "-f", CONTAINER], capture_output=True)
@@ -99,11 +109,11 @@ def client(pg_port):
     from app.auth import AuthError
     from app.config import settings
 
-    settings.pg_host = "127.0.0.1"
+    settings.pg_host = os.environ.get("WB_TEST_PG_HOST", "127.0.0.1")
     settings.pg_port = pg_port
     settings.pg_db = "whiteboard"
     settings.pg_user = "whiteboard"
-    settings.pg_password = PG_PASSWORD
+    settings.pg_password = os.environ.get("WB_TEST_PG_PASSWORD", PG_PASSWORD)
 
     async def fake_validate(token: str) -> dict[str, str]:
         who = TOKENS.get(token)
