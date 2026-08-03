@@ -99,10 +99,22 @@ Mint the waker token with `scripts/mint_waker_token.py`. Never commit it —
 
 ### 3. Compose service
 
-Merge `deploy/docker-compose.snippet.yml` into the host's `docker-compose.yml`. It
-uses `network_mode: host`, so the container reaches Postgres and bsky-mcp on
+`docker-compose.yml` is tracked in this repo at the root, so the checkout *is* the
+deploy directory — run `docker compose` from `/opt/whiteboard` and everything
+resolves. There is nothing to merge into the PDS's compose file, and nothing to
+hand-edit on the server.
+
+It uses `network_mode: host`, so the container reaches Postgres and bsky-mcp on
 `127.0.0.1` and Caddy reaches the backend on `127.0.0.1:8092`. **No port mapping is
 used or possible in host mode.**
+
+Postgres is deliberately *not* in this file. It runs as a separately managed
+`whiteboard-postgres` container with live data in it; folding it in would put that
+data one `docker compose down -v` away from deletion.
+
+The service carries `com.centurylinklabs.watchtower.enable: "false"` because
+watchtower runs on this box and would otherwise be free to replace the container
+outside of a deploy.
 
 ### 4. Caddy
 

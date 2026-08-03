@@ -1,0 +1,53 @@
+# Whiteboard service. Lives at /opt/whiteboard/docker-compose.yml on the VPS —
+# this repo IS the deploy directory, so `docker compose` commands run from the
+# repo root and all paths below are relative to it.
+#
+# Deploy:  git pull && docker compose up -d --build whiteboard-backend
+#
+# This is deliberately its own compose project rather than a fragment merged
+# into the PDS's compose file. The backend runs in host network mode and Caddy
+# reaches it on 127.0.0.1:8092, so nothing about it needs to share a project
+# with the PDS — and keeping it separate means a whiteboard rebuild never
+# restarts the PDS.
+#
+# Postgres is NOT defined here. It runs as a separately managed container
+# (`whiteboard-postgres`, postgres:16) with live data in it. Bringing it under
+# this file would put that data one `docker compose down -v` away from
+# deletion. Leave it alone.
+
+services:
+  whiteboard-backend:
+    build:
+      # Context is the repo ROOT, not ./backend. backend/Dockerfile is
+      # multi-stage and builds the frontend from ../frontend, which a context
+      # of ./backend cannot see.
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+
+    # Real values, gitignored. See deploy/.env.example for the full key list —
+    # every setting the app reads is WB_-prefixed (backend/app/config.py).
+    env_file: ./.env
+    environment:
+      WB_PG_HOST: 127.0.0.1
+    volumes:
+      # pydantic-settings also reads /app/.env directly; belt and braces with
+      # env_file above.
+      - ./.env:/app/.env:ro
+
+    # Host networking: the container reaches Postgres and bsky-mcp on
+    # 127.0.0.1, and Caddy reaches the backend on 127.0.0.1:8092. No port
+    # mapping is used or possible in this mode.
+    network_mode: host
+
+    labels:
+      # Watchtower runs on this box. Without this the container could be
+      # restarted or replaced out from under a deploy.
+      com.centurylinklabs.watchtower.enable: "false"
+
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8092/healthz', timeout=5).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
