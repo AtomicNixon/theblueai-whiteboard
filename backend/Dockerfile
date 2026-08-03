@@ -20,6 +20,16 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
 COPY frontend/ ./
+
+# Cap the JS heap so a memory-starved machine fails fast with a clear
+# "JavaScript heap out of memory" instead of swap-thrashing for half an hour
+# and then being OOM-killed with a bare exit 137. Rollup's chunk-rendering pass
+# is the expensive part — Excalidraw pulls in the whole Mermaid engine
+# (cytoscape, katex, dagre), which is ~2400 modules and 133 output chunks.
+#
+# If you hit the heap limit, don't raise this: build the image elsewhere. CI
+# publishes it to ghcr.io on every push to main, and the VPS pulls.
+ENV NODE_OPTIONS=--max-old-space-size=1536
 RUN npm run build          # tsc -b && vite build -> /build/dist
 
 # ---- Stage 2: backend runtime ------------------------------------------------

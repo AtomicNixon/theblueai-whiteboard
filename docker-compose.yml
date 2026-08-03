@@ -17,9 +17,20 @@
 
 services:
   whiteboard-backend:
+    # Built and published by CI on every push to main. The VPS should PULL,
+    # not build: it has 2 GB shared between the PDS, Postgres, bsky-mcp, Caddy
+    # and this container, and Rollup's chunk-rendering pass doesn't fit in
+    # what's left — a deploy build spent 31 minutes swapping and was OOM-killed
+    # (exit 137).
+    #
+    #   deploy:  docker compose pull && docker compose up -d
+    #   (do NOT pass --build on the VPS)
+    image: ghcr.io/atomicnixon/blueai-whiteboard:latest
+
     build:
-      # Context is the repo ROOT, not ./backend. backend/Dockerfile is
-      # multi-stage and builds the frontend from ../frontend, which a context
+      # Kept so `docker compose up -d --build` still works on a machine with
+      # room for it. Context is the repo ROOT, not ./backend: backend/Dockerfile
+      # is multi-stage and builds the frontend from ../frontend, which a context
       # of ./backend cannot see.
       context: .
       dockerfile: backend/Dockerfile

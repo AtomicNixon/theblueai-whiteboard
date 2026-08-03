@@ -74,8 +74,18 @@ jobs:
         run: npm run build
 
   image:
-    name: docker image builds
+    name: build image (and publish from main)
     runs-on: ubuntu-latest
+
+    # The VPS has 2 GB shared between the PDS, Postgres, bsky-mcp, Caddy and
+    # the running whiteboard. Rollup's chunk-rendering pass doesn't fit in
+    # what's left: a deploy build spent 31 minutes swapping and was then
+    # OOM-killed (exit 137). Building here and letting the VPS pull removes
+    # that failure mode entirely — and this runner does it in seconds.
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -92,6 +102,28 @@ jobs:
             ls /app/static/assets/ | grep -qE "^index-.*\.js$" || { echo "no bundle in image"; exit 1; }
             echo "frontend present in image"
           '
+
+      # Publish only from main, and only after the checks above pass — so a
+      # broken image can never become :latest.
+      - name: Log in to ghcr.io
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          # Registry paths must be lowercase; the owner name may not be.
+          REPO=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          docker tag whiteboard:ci "$REPO:latest"
+          docker tag whiteboard:ci "$REPO:${{ github.sha }}"
+          docker push "$REPO:latest"
+          docker push "$REPO:${{ github.sha }}"
+          echo "published $REPO:latest"
+          echo "           $REPO:${{ github.sha }}"
 
   compose:
     name: compose config valid
