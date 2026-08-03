@@ -19,3 +19,14 @@ whiteboard-deploy.zip
 # Session transcripts dropped into the working dir. These routinely contain
 # access tokens pasted mid-conversation — never publish them.
 20??-??-??-*.txt
+
+# Postgres data directory. Lives inside the deploy dir on the VPS. Untracked
+# and unignored, it was one `git stash -u` away from being swept into a stash —
+# and git would happily have "restored" a half-copied database.
+pgdata/
+
+# Scratch copies made while debugging a deploy. They rot into stale config
+# nobody remembers is stale.
+*.broken
+*.bak
+*.orig

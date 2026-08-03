@@ -31,6 +31,16 @@ whiteboard-deploy.zip
 *.log
 20??-??-??-*.txt
 
+# Postgres data directory — it lives inside the deploy dir on the VPS. Without
+# this, every `docker compose build` uploads the entire database to the daemon
+# as build context.
+pgdata/
+
+# Scratch copies from deploy debugging.
+*.broken
+*.bak
+*.orig
+
 # Docs aren't needed at runtime.
 *.md
 !backend/README.md
