@@ -1,4 +1,38 @@
 # Add to the existing Caddyfile on the PDS host (Caddy 2).
+#
+# This is the WHOLE block. Proxy everything; do not split routes.
+
 whiteboard.theblueai.org {
+	encode gzip
 	reverse_proxy 127.0.0.1:8092
 }
+
+# WHY NOT file_server
+# ------------------
+# An earlier version of this block routed /api/*, /healthz and /ws/* to the
+# backend and served everything else off disk:
+#
+#     handle {
+#         root * /srv/whiteboard
+#         try_files {path} /index.html
+#         file_server
+#     }
+#
+# That works, but it puts a copy of the built frontend on the host filesystem
+# that nothing in the deploy pipeline updates. The backend image contains the
+# frontend (backend/Dockerfile stage 1 builds it into /app/static), so after a
+# `git pull && docker compose up -d --build` the container had the new SPA and
+# Caddy kept serving the old one from /srv/whiteboard. /healthz returned 200,
+# the API behaved, and the site served six-week-old JavaScript. It went
+# unnoticed for weeks.
+#
+# The backend already handles every path the split config handled by hand:
+#   /api/*     -> routes.router (mounted at /api)
+#   /ws/*      -> ws_routes.router
+#   /healthz   -> main.healthz
+#   /assets/*  -> StaticFiles mount
+#   everything else -> serve_spa returns index.html (the SPA fallback)
+#
+# Caddy 2 proxies WebSocket upgrades natively, so /ws/* needs no special
+# matcher. `encode gzip` is worth keeping: the bundle is ~1.3 MB uncompressed,
+# ~420 KB gzipped.

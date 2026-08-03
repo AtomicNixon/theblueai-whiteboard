@@ -122,14 +122,22 @@ Merge `deploy/Caddyfile.snippet`:
 
 ```caddy
 whiteboard.theblueai.org {
+	encode gzip
 	reverse_proxy 127.0.0.1:8092
 }
 ```
 
-That's all that's needed. **Caddy 2 proxies WebSocket upgrades natively** — the
-`@websocket` matcher block in the old version of this runbook was unnecessary and, as
-written (two `reverse_proxy` directives in one block), would not have behaved as
-intended.
+That's all that's needed. **Caddy 2 proxies WebSocket upgrades natively** — no
+`@websocket` matcher is required.
+
+**Do not add `root` + `file_server` to serve the frontend off disk.** The backend
+image contains the built frontend at `/app/static` and serves it, including the SPA
+fallback. A split config that proxies only `/api/*`, `/healthz` and `/ws/*` and
+file-serves the rest will keep serving a stale copy from the host filesystem after
+every deploy — the container updates, the bundle doesn't, and `/healthz` returns 200
+throughout. This was live on the VPS from launch until 2026-08-03 and is why
+production ran weeks-old JavaScript against a current backend. See the note in
+`deploy/Caddyfile.snippet`.
 
 ### 5. DNS
 
