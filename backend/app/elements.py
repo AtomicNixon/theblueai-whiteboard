@@ -86,6 +86,16 @@ def _nonce() -> int:
     return random.randint(1, 2**31 - 1)
 
 
+def is_ephemeral(data: dict[str, Any]) -> bool:
+    """Images are relayed live and never stored. See ephemeral.py.
+
+    Persisting the element while dropping its file would leave a `fileId`
+    pointing at bytes that no longer exist — a permanent broken placeholder
+    that never resolves. If the picture is ephemeral, so is its element.
+    """
+    return (data or {}).get("type") == "image"
+
+
 def normalize(kind: str, data: dict[str, Any], element_id: str) -> dict[str, Any]:
     """Return a complete, renderable Excalidraw element.
 

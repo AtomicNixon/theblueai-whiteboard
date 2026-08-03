@@ -27,6 +27,7 @@ export interface SnapshotOut {
 export type WsOp =
   | { op: 'snapshot'; canvas: CanvasOut; elements: ElementOut[]; me: string }
   | { op: 'add'; element: ElementOut }
+  | { op: 'add_bulk'; elements: ElementOut[] }
   | { op: 'update'; element: ElementOut }
   | { op: 'delete'; element_id: string }
   | { op: 'error'; message: string }

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Excalidraw, CaptureUpdateAction } from '@excalidraw/excalidraw'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import type { CanvasOut, ElementOut, SnapshotOut, WsOp } from './types'
+import { vectorizeImage } from './vectorize'
 
 /**
  * CanvasView wires Excalidraw (drawing surface) to our own WebSocket transport.
@@ -86,6 +87,14 @@ interface ExcAPI {
   getSceneElements: () => ExcalidrawElement[]
 }
 
+/** Excalidraw holds image binary here, keyed by the element's `fileId`. */
+interface BinaryFile { id: string; mimeType: string; dataURL: string }
+type BinaryFiles = Record<string, BinaryFile>
+
+/** Element budget for a dropped image. See vectorize.ts for why we redraw
+ *  pictures instead of storing them. */
+const IMAGE_ELEMENTS = 250
+
 interface KnownInfo { v: number; wbid?: string }
 
 export default function CanvasView({
@@ -111,6 +120,9 @@ export default function CanvasView({
   })
   const flushTimer = useRef<number | null>(null)
   const disposedRef = useRef(false)
+  // Image elements already converted, so onChange doesn't re-run the quadtree
+  // on every subsequent event.
+  const imagesHandledRef = useRef<Set<string>>(new Set())
 
   // Apply a full element list to the scene (snapshot/remote ops/stamping wbid).
   // After updateScene normalizes elements, rebuild the baseline so the onChange
@@ -149,14 +161,32 @@ export default function CanvasView({
     if (pend.creates.size) {
       const scene = editorApi?.getSceneElements() ?? []
       const alive = new Set(scene.map((e) => e.id))
+      const batch: Array<[string, { kind: string; data: Record<string, unknown> }]> = []
       for (const [exid, el] of pend.creates) {
         if (!alive.has(exid)) continue // drawn then erased before flush
-        const { kind, data } = excToBackend(el)
+        batch.push([exid, excToBackend(el)])
+      }
+
+      if (batch.length === 1) {
+        const [exid, payload] = batch[0]
         try {
           const created = await api<ElementOut>(`/canvases/${canvas.id}/elements`, token, {
-            method: 'POST', body: JSON.stringify({ kind, data }),
+            method: 'POST', body: JSON.stringify(payload),
           })
           stampWbid(exid, created.id, created.owner_did)
+        } catch (e) { setErr(String(e)) }
+      } else if (batch.length > 1) {
+        // A vectorized image is hundreds of rectangles at once; one request
+        // each would be hundreds of round trips for a single paste.
+        try {
+          const created = await api<ElementOut[]>(
+            `/canvases/${canvas.id}/elements/bulk`, token,
+            { method: 'POST', body: JSON.stringify({ elements: batch.map(([, p]) => p) }) },
+          )
+          created.forEach((c, i) => {
+            const exid = batch[i]?.[0]
+            if (exid) stampWbid(exid, c.id, c.owner_did)
+          })
         } catch (e) { setErr(String(e)) }
       }
     }
@@ -190,13 +220,56 @@ export default function CanvasView({
     applyScene(next)
   }
 
-  function handleChange(next: readonly ExcalidrawElement[]) {
+  /**
+   * A dropped or pasted image becomes a few hundred rectangles.
+   *
+   * We never store pictures — see vectorize.ts. The image element is removed
+   * from the scene and replaced by its approximation, which is made of ordinary
+   * marks and therefore syncs and persists with no special handling. Every
+   * rectangle shares a groupId, so it still behaves like one object.
+   */
+  async function vectorizeAndReplace(el: ExcalidrawElement, file: BinaryFile) {
+    const api = excalidrawAPIRef.current
+    if (!api) return
+    try {
+      const rects = await vectorizeImage(
+        file.dataURL,
+        { x: el.x, y: el.y, width: el.width, height: el.height },
+        { maxElements: IMAGE_ELEMENTS },
+      )
+      if (disposedRef.current) return
+
+      // Drop the image element, add the approximation. These are brand-new
+      // local elements with no wbid, so the normal flush persists them.
+      const scene = api.getSceneElements().filter((e) => e.id !== el.id)
+      applyScene([...scene, ...(rects as unknown as ExcalidrawElement[])])
+    } catch (e) {
+      setErr(`could not convert that image: ${e instanceof Error ? e.message : String(e)}`)
+      // Leave the image in place rather than silently eating it; it won't
+      // persist, but the user can see that something went wrong.
+    }
+  }
+
+  function handleChange(next: readonly ExcalidrawElement[], _state: unknown, files?: BinaryFiles) {
     const arr = next as ExcalidrawElement[]
     const pend = pendingRef.current
     const seen = new Set<string>()
 
     for (const el of arr) {
       seen.add(el.id)
+
+      // Images are converted, never stored. Excalidraw adds the element before
+      // its binary finishes loading, so wait for the file to appear (onChange
+      // fires again when it does).
+      if (el.type === 'image' && !el.isDeleted) {
+        const fileId = (el as unknown as { fileId?: string }).fileId
+        const file = fileId && files ? files[fileId] : undefined
+        if (file?.dataURL && !imagesHandledRef.current.has(el.id)) {
+          imagesHandledRef.current.add(el.id)
+          void vectorizeAndReplace(el, file)
+        }
+        continue // never queue an image element for the server
+      }
       const info = knownRef.current.get(el.id)
       const wbid = (el as any).customData?.wbid as string | undefined
       if (el.isDeleted) {
@@ -258,6 +331,16 @@ export default function CanvasView({
       if (op.op === 'snapshot') {
         myDidRef.current = op.me
         applyScene(op.elements.map((e) => backendToExc(e, op.me)))
+        return
+      }
+      if (op.op === 'add_bulk') {
+        // Someone dropped an image; it arrives as one batch of rectangles.
+        const scene = editorApi.getSceneElements()
+        const byWbid = new Map(scene.map((p) => [(p as any).customData?.wbid, p]))
+        const incoming = op.elements
+          .filter((e) => !byWbid.has(e.id))
+          .map((e) => backendToExc(e, myDidRef.current))
+        if (incoming.length) applyScene([...scene, ...incoming])
         return
       }
       if (op.op === 'add' || op.op === 'update') {

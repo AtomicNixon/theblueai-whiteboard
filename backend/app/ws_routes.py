@@ -16,7 +16,7 @@ from . import db, ws
 from .ai_trigger import extract_tags, schedule_ai_tagged
 from .auth import AuthError, validate_session, validate_token
 from .config import settings
-from .elements import normalize, strip_for_storage
+from .elements import is_ephemeral, normalize, strip_for_storage
 from .serializers import canvas_out, element_out
 
 log = logging.getLogger("whiteboard.wsroute")
@@ -92,6 +92,14 @@ async def _handle_add(ws_conn: WebSocket, canvas_id: str, user: dict, msg: dict)
         await ws_conn.send_text(json.dumps({"op": "error", "message": "bad kind"}))
         return
     data = msg.get("data", {}) or {}
+    if is_ephemeral(data):
+        # Images are converted to rectangles client-side and never stored;
+        # persisting one leaves a fileId pointing at bytes we don't have.
+        await ws_conn.send_text(json.dumps({
+            "op": "error",
+            "message": "Images are converted to shapes in the browser, not stored.",
+        }))
+        return
     eid = uuid.uuid4().hex
     data = normalize(kind, data, eid)
     el = await db.add_element(eid, canvas_id, kind, user["did"], data)

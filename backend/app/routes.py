@@ -11,13 +11,17 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from . import db, ws
 from .ai_trigger import extract_tags, schedule_ai_tagged
 from .auth import S2S_ACTOR_HEADER, S2S_SECRET_HEADER, AuthError, authenticate
-from .elements import normalize, strip_for_storage
-from .models import CanvasCreate, ElementIn, ElementUpdate
+from .elements import is_ephemeral, normalize, strip_for_storage
+from .models import CanvasCreate, ElementIn, ElementsIn, ElementUpdate
 from .serializers import canvas_out, element_out
 
 log = logging.getLogger("whiteboard.http")
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
+
+# A vectorized image is a few hundred rectangles. This bounds a single request
+# so one paste can't be used to push thousands of rows in at once.
+MAX_BULK = 1000
 
 
 async def current_user(
@@ -112,6 +116,13 @@ async def add_element(user: UserDep, canvas_id: str, body: ElementIn) -> dict:
         raise HTTPException(404, "canvas not found")
     if c["status"] != "active":
         raise HTTPException(409, "canvas is archived")
+    if is_ephemeral(body.data):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Images are shared live over the WebSocket and never stored. "
+            "Send them as an 'image' op, not as an element.",
+        )
+
     eid = uuid.uuid4().hex
     # Browser clients post a complete Excalidraw element and pass through
     # untouched; AI clients post {text, x, y} and get completed here.
@@ -127,6 +138,39 @@ async def add_element(user: UserDep, canvas_id: str, body: ElementIn) -> dict:
 
     out = element_out(el)
     await ws.broadcast(canvas_id, {"op": "add", "element": out})
+    return out
+
+
+@router.post("/canvases/{canvas_id}/elements/bulk")
+async def add_elements_bulk(user: UserDep, canvas_id: str, body: ElementsIn) -> list[dict]:
+    """Create many elements in one request.
+
+    A vectorized image is a few hundred rectangles arriving at once; one POST
+    each would be hundreds of round trips for a single paste. Broadcast is a
+    single 'add_bulk' op for the same reason.
+    """
+    c = await db.get_canvas(canvas_id)
+    if c is None:
+        raise HTTPException(404, "canvas not found")
+    if c["status"] != "active":
+        raise HTTPException(409, "canvas is archived")
+    if len(body.elements) > MAX_BULK:
+        raise HTTPException(413, f"too many elements in one request (max {MAX_BULK})")
+
+    out: list[dict] = []
+    for item in body.elements:
+        if is_ephemeral(item.data):
+            continue  # images are vectorized client-side; never stored
+        eid = uuid.uuid4().hex
+        data = normalize(item.kind, item.data, eid)
+        el = await db.add_element(eid, canvas_id, item.kind, user["did"], data)
+        out.append(element_out(el))
+        if item.kind == "text":
+            for tag in extract_tags(str(item.data.get("text", ""))):
+                schedule_ai_tagged(canvas_id, tag)
+
+    if out:
+        await ws.broadcast(canvas_id, {"op": "add_bulk", "elements": out})
     return out
 
 

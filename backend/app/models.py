@@ -23,6 +23,11 @@ class ElementIn(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class ElementsIn(BaseModel):
+    """Bulk create — a vectorized image arrives as hundreds of rectangles."""
+    elements: list[ElementIn] = Field(default_factory=list)
+
+
 class ElementUpdate(BaseModel):
     data: dict[str, Any]
 
