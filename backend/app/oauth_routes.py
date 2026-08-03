@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from . import atproto_oauth as oa
 from . import db
+from . import password_auth as pw
 from .config import settings
 
 log = logging.getLogger("whiteboard.oauth")
@@ -220,6 +221,35 @@ async def callback(state: str = "", code: str = "", iss: str = "",
 
 
 # --- session ----------------------------------------------------------------
+
+
+# --- password / app-password login ------------------------------------------
+
+
+class PasswordLoginIn(BaseModel):
+    identifier: str
+    password: str
+
+
+@router.post("/api/auth/login-password")
+async def login_password(body: PasswordLoginIn) -> dict:
+    """Sign in with a handle + password (or app password) on our own PDS.
+
+    This is the path that works from whiteboard.theblueai.org today; the OAuth
+    flow above is refused because a sibling subdomain of the PDS produces
+    `Sec-Fetch-Site: same-site`. See password_auth.py.
+    """
+    try:
+        who = await pw.verify_credentials(body.identifier, body.password)
+    except pw.LoginError as e:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(e)) from e
+
+    token = secrets.token_urlsafe(32)
+    await db.create_session(
+        hash_token(token), who["did"], who["handle"], settings.session_ttl_seconds
+    )
+    await db.prune_sessions()
+    return {"session": token, "did": who["did"], "handle": who["handle"]}
 
 
 def _bearer(authorization: str | None) -> str:

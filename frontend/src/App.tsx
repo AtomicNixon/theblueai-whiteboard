@@ -25,6 +25,7 @@ export default function App() {
   const [token, setToken] = useState<string>(() => localStorage.getItem(TOKEN_KEY) ?? '')
   const [handle, setHandle] = useState<string>(() => localStorage.getItem(HANDLE_KEY) ?? '')
   const [handleInput, setHandleInput] = useState('')
+  const [password, setPassword] = useState('')
   const [canvas, setCanvas] = useState<CanvasOut | null>(null)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
@@ -61,23 +62,37 @@ export default function App() {
     }
   }
 
+  /**
+   * Sign in with handle + password against our own PDS.
+   *
+   * The OAuth flow (POST /api/auth/login) is better — the whiteboard would
+   * never see a credential — but it can't be used from this hostname:
+   * whiteboard.theblueai.org -> pds.theblueai.org is `Sec-Fetch-Site:
+   * same-site`, which the atproto OAuth provider refuses. The xrpc endpoints
+   * have no such restriction, so this is the path that works today.
+   */
   async function signIn() {
-    const h = handleInput.trim().replace(/^@/, '')
-    if (!h) return
+    const id = handleInput.trim().replace(/^@/, '')
+    if (!id || !password) return
     setBusy(true)
     setErr('')
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await fetch('/api/auth/login-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ handle: h }),
+        body: JSON.stringify({ identifier: id, password }),
       })
       const body = await res.json()
-      if (!res.ok) throw new Error(body.detail ?? `sign-in failed (${res.status})`)
-      // Hand off to the PDS's consent screen.
-      window.location.href = body.redirect_url
+      if (!res.ok) throw new Error(body.detail ?? `Sign-in failed (${res.status})`)
+
+      setPassword('')
+      localStorage.setItem(TOKEN_KEY, body.session)
+      localStorage.setItem(HANDLE_KEY, body.handle)
+      setHandle(body.handle)
+      setToken(body.session)
     } catch (e) {
       setErr(String(e instanceof Error ? e.message : e))
+    } finally {
       setBusy(false)
     }
   }
@@ -123,12 +138,27 @@ export default function App() {
           spellCheck={false}
         />
 
+        <label htmlFor="password"
+               style={{ display: 'block', fontSize: 14, marginBottom: 4, marginTop: 12 }}>
+          Password <span style={{ color: '#999' }}>or app password</span>
+        </label>
+        <input
+          id="password"
+          type="password"
+          placeholder="••••••••••••"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') void signIn() }}
+          disabled={busy}
+          style={{ width: '100%', padding: 8, boxSizing: 'border-box', fontSize: 15 }}
+        />
+
         <button
           onClick={() => void signIn()}
-          disabled={busy || !handleInput.trim()}
-          style={{ marginTop: 10, padding: '8px 18px', fontSize: 15 }}
+          disabled={busy || !handleInput.trim() || !password}
+          style={{ marginTop: 14, padding: '8px 18px', fontSize: 15 }}
         >
-          {busy ? 'Redirecting…' : 'Sign in'}
+          {busy ? 'Signing in…' : 'Sign in'}
         </button>
 
         {err && (
@@ -138,9 +168,11 @@ export default function App() {
         )}
 
         <p style={{ color: '#999', fontSize: 12, marginTop: 28, lineHeight: 1.5 }}>
-          You'll be sent to your PDS to approve access, then returned here. The
-          whiteboard only learns who you are — it never gets the ability to post
-          or read on your behalf.
+          Whiteboard accounts are Bluesky accounts on{' '}
+          <strong>pds.theblueai.org</strong>. Your password is checked against
+          that server and never stored here — the whiteboard only keeps your
+          handle and account id. An app password works too, and is easier to
+          revoke.
         </p>
       </div>
     )

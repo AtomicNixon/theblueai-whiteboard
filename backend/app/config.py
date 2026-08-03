@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     pg_user: str = "whiteboard"
     pg_password: str = ""
 
+    # Our PDS. Whiteboard users are exactly the subset of Bluesky users whose
+    # accounts live here — if your repo isn't on this server, you're not a
+    # whiteboard user. Password login calls com.atproto.server.createSession
+    # against this host, so that rule is enforced by construction rather than
+    # by a check we could forget.
+    pds_url: str = "https://pds.theblueai.org"
+
     # bsky-mcp integration — used to validate user sessions and resolve DIDs.
     bsky_mcp_url: str = "http://127.0.0.1:8090"
 
