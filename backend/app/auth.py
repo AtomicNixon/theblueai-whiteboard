@@ -179,16 +179,35 @@ def validate_s2s(secret: str | None, actor_did: str | None) -> dict[str, str]:
     return {"did": actor_did, "handle": actor_did}
 
 
+async def validate_session(token: str) -> dict[str, str] | None:
+    """A whiteboard session minted after AT-Proto OAuth login. None if unknown."""
+    from . import db
+    from .oauth_routes import hash_token
+
+    return await db.get_session(hash_token(token))
+
+
 async def authenticate(
     bearer: str | None, s2s_secret: str | None, actor_did: str | None
 ) -> dict[str, str]:
     """Resolve a caller's identity by whichever mechanism they presented.
 
-    S2S is checked first and only when a secret header is actually present, so
-    a browser's bearer token is never shadowed by it.
+    Order matters:
+      1. S2S — only when the secret header is actually present, so a browser's
+         bearer token is never shadowed by it.
+      2. A whiteboard session token from AT-Proto OAuth. This is the real
+         per-user identity and is checked before the legacy path.
+      3. A bsky-mcp access token, if still enabled. Every such token resolves
+         to bsky-mcp's default account, so this cannot distinguish users — it
+         exists only so agent tokens keep working during the migration.
     """
     if s2s_secret is not None:
         return validate_s2s(s2s_secret, actor_did)
     if bearer:
-        return await validate_token(bearer)
+        session = await validate_session(bearer)
+        if session is not None:
+            return session
+        if settings.allow_bsky_mcp_tokens:
+            return await validate_token(bearer)
+        raise AuthError("unknown session — sign in with your theblueai.org account")
     raise AuthError("no credentials presented")

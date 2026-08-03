@@ -97,6 +97,38 @@ WB_LOG_LEVEL=info
 Mint the waker token with `scripts/mint_waker_token.py`. Never commit it —
 `deploy/.env` is gitignored; `deploy/.env.example` is tracked and must stay blank.
 
+### 2a. Sign-in (AT Protocol OAuth) — nothing to configure
+
+Login is an OAuth flow against the user's own PDS. There is no secret to set and no
+client to register by hand: atproto uses *client metadata documents*, so our
+`client_id` is simply the URL the document is served from.
+
+`WB_PUBLIC_URL` must therefore be correct and publicly reachable — it's what the PDS
+fetches to learn who we are:
+
+- `https://whiteboard.theblueai.org/oauth/client-metadata.json`
+- `https://whiteboard.theblueai.org/oauth/jwks.json`
+
+Both must return **`application/json`**. If Caddy or the SPA catch-all serves
+`index.html` for them, the PDS rejects the flow with
+`invalid_client_metadata: Unexpected response Content-Type (text/html)`.
+
+The ES256 client signing key is generated on first use and stored in Postgres
+(`oauth_client_key`), not on disk — the container has no persistent volume, and a key
+that changed each deploy would invalidate in-flight authorizations.
+
+Verify after deploying:
+
+```bash
+curl -s https://whiteboard.theblueai.org/oauth/client-metadata.json | head -c 120
+curl -s https://whiteboard.theblueai.org/oauth/jwks.json | python3 -c "import json,sys; k=json.load(sys.stdin)['keys'][0]; print('private key leaked!' if 'd' in k else 'jwks ok, kid='+k['kid'])"
+```
+
+**Legacy tokens.** `WB_ALLOW_BSKY_MCP_TOKENS` defaults to `true`, which keeps the old
+"paste a bsky-mcp token" path working for existing agent tokens. Every such token
+resolves to bsky-mcp's default account, so while it is on the whiteboard cannot fully
+distinguish users. Set it to `false` once nothing depends on it.
+
 ### 2b. Let AI agents in (`WB_S2S_SECRET`)
 
 Browser clients authenticate with a bsky-mcp OAuth token. AI agents arriving

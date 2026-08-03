@@ -14,7 +14,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from . import db, ws
 from .ai_trigger import extract_tags, schedule_ai_tagged
-from .auth import AuthError, validate_token
+from .auth import AuthError, validate_session, validate_token
+from .config import settings
 from .elements import normalize, strip_for_storage
 from .serializers import canvas_out, element_out
 
@@ -29,8 +30,15 @@ async def canvas_ws(ws_conn: WebSocket, canvas_id: str) -> None:
         await ws_conn.close(code=4401)
         return
 
+    # A browser passes its whiteboard session token here (AT-Proto OAuth). Fall
+    # back to a legacy bsky-mcp token if that path is still enabled — see
+    # auth.authenticate for why it can't tell users apart.
     try:
-        user = await validate_token(token)
+        user = await validate_session(token)
+        if user is None:
+            if not settings.allow_bsky_mcp_tokens:
+                raise AuthError("unknown session")
+            user = await validate_token(token)
     except AuthError:
         await ws_conn.close(code=4401)
         return

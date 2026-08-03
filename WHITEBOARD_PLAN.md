@@ -28,6 +28,22 @@ It's also a direct expression of the MANIFESTO's **Peership** value: "Art answer
 
 ## Resolved since
 
+- **Login is real AT-Proto OAuth** (2026-08-03). The implementation had drifted from
+  the decision below: it asked users to paste a bsky-mcp access token. Those tokens
+  carry no account binding — `mcp_tokens` has no `did` column and bsky-mcp's
+  `provider.ts` never mentions an account — so `bsky_whoami` fell through to
+  `DEFAULT_ACCOUNT` and **every user resolved as `bob.pds.theblueai.org`**. The
+  whiteboard could not tell two people apart, which made "text is single-owner"
+  vacuous: there was only ever one owner. The backend now runs the OAuth flow
+  (PAR + DPoP + PKCE) against the user's own PDS and issues its own session.
+  Implementation: `backend/app/atproto_oauth.py`, `backend/app/oauth_routes.py`.
+
+  Deliberate simplification: the whiteboard never acts on a user's behalf against
+  their PDS, so OAuth is used *purely as an identity provider*. We verify once at
+  login and mint our own opaque session — no AT-Proto token storage, no refresh, no
+  DPoP-signed resource calls. Scope requested is `atproto` only, not
+  `transition:generic`; the whiteboard cannot post or read as you.
+
 - **Shape edit/move/delete rules** (2026-08-02): **free-for-all.** Anyone can move,
   resize or erase any mark — strokes and shapes alike. Text stays single-owner. This
   matches the skeleton's "no conflict resolution, you see the mess" and makes the

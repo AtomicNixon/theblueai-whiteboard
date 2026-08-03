@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, routes, ws_routes
+from . import db, oauth_routes, routes, ws_routes
 from .config import settings
 
 logging.basicConfig(
@@ -50,6 +50,8 @@ async def healthz() -> dict:
 
 app.include_router(routes.router, prefix="/api")
 app.include_router(ws_routes.router)
+# Declares its own full paths (/oauth/... and /api/auth/...), so no prefix.
+app.include_router(oauth_routes.router)
 
 # Paths that belong to the backend API surface. An unmatched path under one of
 # these is a bug in the caller, not a client-side route, and must 404 as JSON —
@@ -57,7 +59,7 @@ app.include_router(ws_routes.router)
 # returned index.html with status 200, so a client checking `res.ok` saw success
 # and then failed parsing HTML as JSON. That is a genuinely awful thing to debug
 # from inside an MCP tool.
-_API_PREFIXES = ("api/", "ws/", "healthz")
+_API_PREFIXES = ("api/", "ws/", "healthz", "oauth/")
 
 
 # Serve the built React + Excalidraw frontend for any path that isn't an API or

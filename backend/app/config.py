@@ -41,6 +41,18 @@ class Settings(BaseSettings):
     waker_bsky_token: str = ""
     waker_account: str = "bob.pds.theblueai.org"
 
+    # Whiteboard sessions issued after AT-Proto OAuth login. 30 days — the
+    # whiteboard holds no PDS credentials, so an expired session just means
+    # signing in again.
+    session_ttl_seconds: int = 30 * 24 * 3600
+
+    # Accept legacy bsky-mcp bearer tokens as a login mechanism. These resolve
+    # to bsky-mcp's DEFAULT_ACCOUNT for EVERY caller (mcp_tokens has no did
+    # column), so with this on, the whiteboard cannot tell users apart. Kept
+    # only so existing agent tokens keep working during the migration to
+    # AT-Proto OAuth. Turn off once nothing depends on it.
+    allow_bsky_mcp_tokens: bool = True
+
     # Canvas constraints
     canvas_width: int = 3840
     canvas_height: int = 2160

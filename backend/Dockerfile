@@ -35,7 +35,8 @@ COPY backend/pyproject.toml ./
 RUN pip install --upgrade pip && \
     pip install "fastapi>=0.115.0" "uvicorn[standard]>=0.32.0" "asyncpg>=0.30.0" \
                 "pydantic>=2.9.0" "pydantic-settings>=2.6.0" "httpx>=0.27.0" \
-                "websockets>=13.0" "python-multipart>=0.0.12"
+                "websockets>=13.0" "python-multipart>=0.0.12" \
+                "authlib>=1.3.0" "dnspython>=2.6.0"
 
 COPY backend/app ./app
 

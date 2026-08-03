@@ -12,6 +12,13 @@ dependencies = [
     "httpx>=0.27.0",
     "websockets>=13.0",
     "python-multipart>=0.0.12",
+    # AT Protocol OAuth: JWK handling, ES256 client assertions, DPoP proofs
+    # and S256 PKCE challenges.
+    "authlib>=1.3.0",
+    # Optional but preferred: handle resolution via _atproto DNS TXT records.
+    # Without it we fall back to the HTTPS well-known, which every account on
+    # pds.theblueai.org publishes.
+    "dnspython>=2.6.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +33,11 @@ dev = [
 testpaths = ["tests"]
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["ignore::DeprecationWarning"]
+# Tests that talk to the live PDS are opt-in: `pytest -m network`.
+addopts = "-m 'not network'"
+markers = [
+    "network: hits the real PDS at pds.theblueai.org (opt-in, needs internet)",
+]
 
 [tool.ruff]
 line-length = 100

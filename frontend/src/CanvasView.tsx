@@ -89,8 +89,14 @@ interface ExcAPI {
 interface KnownInfo { v: number; wbid?: string }
 
 export default function CanvasView({
-  token, canvas, onBack, onLogout,
-}: { token: string; canvas: CanvasOut; onBack: () => void; onLogout: () => void }) {
+  token, handle, canvas, onBack, onLogout,
+}: {
+  token: string
+  handle?: string
+  canvas: CanvasOut
+  onBack: () => void
+  onLogout: () => void
+}) {
   const [err, setErr] = useState('')
   const excalidrawAPIRef = useRef<ExcAPI | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -294,9 +300,17 @@ export default function CanvasView({
       <div style={{ padding: '8px 12px', borderBottom: '1px solid #ddd', display: 'flex', gap: 12, alignItems: 'center' }}>
         <button onClick={onBack}>← Back</button>
         <strong>{canvas.title || '(untitled)'}</strong>
-        <span style={{ color: '#888' }}>{canvas.id}</span>
+        {/* The id is how you invite someone: they paste it into "open by id". */}
+        <span
+          style={{ color: '#888', cursor: 'pointer', fontFamily: 'monospace', fontSize: 13 }}
+          title="Click to copy — share this id to invite someone"
+          onClick={() => void navigator.clipboard?.writeText(canvas.id)}
+        >
+          {canvas.id}
+        </span>
         {err && <span style={{ color: 'crimson' }}>{err}</span>}
         <div style={{ flex: 1 }} />
+        {handle && <span style={{ color: '#888', fontSize: 14 }}>{handle}</span>}
         <button onClick={onLogout}>Log out</button>
       </div>
       <div style={{ flex: 1 }}>

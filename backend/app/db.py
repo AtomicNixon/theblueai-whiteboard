@@ -78,6 +78,45 @@ CREATE TABLE IF NOT EXISTS canvas_members (
     last_seen   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (canvas_id, did)
 );
+
+-- AT Protocol OAuth. See app/atproto_oauth.py for why this exists: bsky-mcp
+-- tokens carry no account binding, so every user resolved as the same DID.
+
+-- Our client signing key, published at /oauth/jwks.json. Kept in the database
+-- rather than a file because the container has no persistent volume — a key
+-- that changed on every deploy would invalidate in-flight authorizations.
+CREATE TABLE IF NOT EXISTS oauth_client_key (
+    id          TEXT PRIMARY KEY,
+    jwk         TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Transient per-flow state: PKCE verifier, the flow's DPoP key, and the
+-- identity we resolved before redirecting. Single-use — consumed by the
+-- callback so an authorization code can't be replayed.
+CREATE TABLE IF NOT EXISTS oauth_auth_request (
+    state                 TEXT PRIMARY KEY,
+    authserver_iss        TEXT NOT NULL,
+    did                   TEXT NOT NULL,
+    handle                TEXT NOT NULL,
+    pds_url               TEXT NOT NULL,
+    pkce_verifier         TEXT NOT NULL,
+    dpop_private_jwk      TEXT NOT NULL,
+    dpop_authserver_nonce TEXT NOT NULL DEFAULT '',
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Whiteboard sessions. We store a SHA-256 of the token, never the token
+-- itself, so a database leak doesn't hand over live sessions.
+CREATE TABLE IF NOT EXISTS wb_session (
+    token_hash  TEXT PRIMARY KEY,
+    did         TEXT NOT NULL,
+    handle      TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wb_session_did ON wb_session(did);
+CREATE INDEX IF NOT EXISTS idx_wb_session_expires ON wb_session(expires_at);
 """
 
 
@@ -106,20 +145,25 @@ async def get_canvas(canvas_id: str) -> dict[str, Any] | None:
 
 
 async def list_canvases_for(did: str, include_archived: bool = False) -> list[dict[str, Any]]:
+    """Canvases you own OR have joined.
+
+    Owner-only would mean a canvas someone invites you to never appears in your
+    list — you'd have to already know its id, which rather defeats a shared
+    canvas. Membership is recorded on first visit (upsert_member), so opening a
+    canvas once puts it in your list from then on.
+    """
+    status_clause = "" if include_archived else "AND c.status = 'active' "
     pool = get_pool()
     async with pool.acquire() as conn:
-        if include_archived:
-            rows = await conn.fetch(
-                "SELECT id, owner_did, title, status, created_at FROM canvases "
-                "WHERE owner_did = $1 ORDER BY created_at DESC",
-                did,
-            )
-        else:
-            rows = await conn.fetch(
-                "SELECT id, owner_did, title, status, created_at FROM canvases "
-                "WHERE owner_did = $1 AND status = 'active' ORDER BY created_at DESC",
-                did,
-            )
+        rows = await conn.fetch(
+            "SELECT DISTINCT c.id, c.owner_did, c.title, c.status, c.created_at "
+            "FROM canvases c "
+            "LEFT JOIN canvas_members m ON m.canvas_id = c.id AND m.did = $1 "
+            "WHERE (c.owner_did = $1 OR m.did IS NOT NULL) "
+            f"{status_clause}"
+            "ORDER BY c.created_at DESC",
+            did,
+        )
     return [dict(r) for r in rows]
 
 
@@ -235,3 +279,102 @@ async def list_members(canvas_id: str) -> list[dict[str, Any]]:
             canvas_id,
         )
     return [dict(r) for r in rows]
+
+
+# --- OAuth: client key, flow state, sessions ---
+
+
+async def get_or_create_client_jwk(generate: Any) -> dict[str, Any]:
+    """Fetch the client signing key, generating it on first use.
+
+    `generate` is a zero-arg callable returning a private JWK dict, injected so
+    this module stays free of crypto imports. Racing callers are fine: the
+    INSERT is ON CONFLICT DO NOTHING and we re-read the winner.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT jwk FROM oauth_client_key WHERE id = 'default'")
+        if row:
+            return json.loads(row["jwk"])
+        await conn.execute(
+            "INSERT INTO oauth_client_key (id, jwk) VALUES ('default', $1) "
+            "ON CONFLICT (id) DO NOTHING",
+            json.dumps(generate()),
+        )
+        row = await conn.fetchrow("SELECT jwk FROM oauth_client_key WHERE id = 'default'")
+    return json.loads(row["jwk"])
+
+
+async def save_auth_request(req: dict[str, Any]) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO oauth_auth_request "
+            "(state, authserver_iss, did, handle, pds_url, pkce_verifier, "
+            " dpop_private_jwk, dpop_authserver_nonce) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            req["state"], req["authserver_iss"], req["did"], req["handle"],
+            req["pds_url"], req["pkce_verifier"], req["dpop_private_jwk"],
+            req.get("dpop_authserver_nonce", ""),
+        )
+
+
+async def take_auth_request(state: str) -> dict[str, Any] | None:
+    """Fetch and delete in one statement — an auth request is single-use.
+
+    DELETE ... RETURNING is atomic, so two concurrent callbacks replaying the
+    same code cannot both succeed.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM oauth_auth_request WHERE state = $1 RETURNING *", state
+        )
+    return dict(row) if row else None
+
+
+async def prune_auth_requests(max_age_seconds: int = 600) -> int:
+    """Drop abandoned flows. Returns how many were removed."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "DELETE FROM oauth_auth_request "
+            f"WHERE created_at < now() - interval '{int(max_age_seconds)} seconds'"
+        )
+    return int(res.rsplit(" ", 1)[-1] or 0)
+
+
+async def create_session(token_hash: str, did: str, handle: str, ttl_seconds: int) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO wb_session (token_hash, did, handle, expires_at) "
+            f"VALUES ($1, $2, $3, now() + interval '{int(ttl_seconds)} seconds') "
+            "ON CONFLICT (token_hash) DO NOTHING",
+            token_hash, did, handle,
+        )
+
+
+async def get_session(token_hash: str) -> dict[str, str] | None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT did, handle FROM wb_session "
+            "WHERE token_hash = $1 AND expires_at > now()",
+            token_hash,
+        )
+    return {"did": row["did"], "handle": row["handle"]} if row else None
+
+
+async def delete_session(token_hash: str) -> bool:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM wb_session WHERE token_hash = $1", token_hash)
+    return res.endswith("1")
+
+
+async def prune_sessions() -> int:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM wb_session WHERE expires_at <= now()")
+    return int(res.rsplit(" ", 1)[-1] or 0)
