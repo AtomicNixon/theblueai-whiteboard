@@ -117,10 +117,13 @@ async def add_element(user: UserDep, canvas_id: str, body: ElementIn) -> dict:
     if c["status"] != "active":
         raise HTTPException(409, "canvas is archived")
     if is_ephemeral(body.data):
+        # Reaching here means an out-of-date client: the browser converts images
+        # to shapes before they ever reach us (frontend/src/vectorize.ts). Say so,
+        # because the fix is a reload, not anything the user did wrong.
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Images are shared live over the WebSocket and never stored. "
-            "Send them as an 'image' op, not as an element.",
+            "Images are converted to shapes in the browser, not stored. "
+            "Your page is running an older version — reload to pick up the current one.",
         )
 
     eid = uuid.uuid4().hex

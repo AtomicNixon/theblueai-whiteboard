@@ -66,7 +66,16 @@ _API_PREFIXES = ("api/", "ws/", "healthz", "oauth/")
 # WebSocket route.  index.html is returned for unknown paths so client-side
 # routing (React Router, if we add it) keeps working.
 if os.path.isdir(_STATIC_DIR):
-    app.mount("/assets", StaticFiles(directory=os.path.join(_STATIC_DIR, "assets")), name="assets")
+    # Asset filenames are content-hashed by Vite, so a changed file is a changed
+    # URL and these can be cached forever.
+    class _ImmutableStatic(StaticFiles):
+        def file_response(self, *args, **kwargs):  # type: ignore[override]
+            resp = super().file_response(*args, **kwargs)
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            return resp
+
+    app.mount("/assets", _ImmutableStatic(directory=os.path.join(_STATIC_DIR, "assets")),
+              name="assets")
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
@@ -77,7 +86,17 @@ if os.path.isdir(_STATIC_DIR):
 
         index_path = os.path.join(_STATIC_DIR, "index.html")
         if os.path.isfile(index_path):
-            return FileResponse(index_path)
+            # The shell must NOT be cached. It names the hashed bundle, so a
+            # stale index.html keeps a browser on old JavaScript indefinitely
+            # after a deploy — which is how a client ended up posting image
+            # elements at a backend that had already stopped accepting them.
+            # media_type is explicit because this route's default response class
+            # would otherwise announce JSON.
+            return FileResponse(
+                index_path,
+                media_type="text/html",
+                headers={"Cache-Control": "no-cache, must-revalidate"},
+            )
         # Signals that stage 1 of the Docker build didn't land. 503 rather than
         # 200 so a health probe or a deploy check can actually see it.
         return JSONResponse(

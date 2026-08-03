@@ -96,6 +96,26 @@ def test_assets_are_served(spa_client):
     assert r.text == "console.log(1)"
 
 
+def test_shell_is_html_and_uncacheable(spa_client):
+    """A cached index.html keeps a browser on old JavaScript after a deploy.
+
+    That actually happened: a client kept posting image elements at a backend
+    that had already stopped accepting them, and the page looked fine.
+    """
+    r = spa_client.get("/")
+    assert r.headers["content-type"].startswith("text/html"), \
+        "the shell must not announce itself as JSON"
+    assert "no-cache" in r.headers.get("cache-control", ""), \
+        "the shell names the hashed bundle; caching it strands clients on old code"
+
+
+def test_hashed_assets_are_cached_forever(spa_client):
+    """Vite content-hashes asset filenames, so a change is a new URL."""
+    r = spa_client.get("/assets/index-TEST1234.js")
+    cc = r.headers.get("cache-control", "")
+    assert "immutable" in cc and "max-age=31536000" in cc
+
+
 def test_healthz_still_wins_over_catchall(spa_client):
     r = spa_client.get("/healthz")
     assert r.status_code == 200
