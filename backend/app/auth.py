@@ -11,6 +11,7 @@ endpoint later, swap this out.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import time
 from typing import Any
@@ -148,3 +149,46 @@ async def validate_token(access_token: str) -> dict[str, str]:
     who = await bsky.whoami(access_token)
     _token_cache[access_token] = (now, who)
     return who
+
+
+# --- Server-to-server auth for AI agents -----------------------------------
+
+S2S_SECRET_HEADER = "x-wb-s2s-secret"
+S2S_ACTOR_HEADER = "x-wb-actor-did"
+
+
+def validate_s2s(secret: str | None, actor_did: str | None) -> dict[str, str]:
+    """Authenticate a bsky-mcp server-to-server call acting for `actor_did`.
+
+    AI agents reach the whiteboard through bsky-mcp's wb_* MCP tools. bsky-mcp
+    has already resolved which account the call is for (via resolveAccount) but
+    holds no bearer token to forward, so it presents a shared secret plus the
+    actor's DID.
+
+    Refuses unless WB_S2S_SECRET is configured non-empty — otherwise an
+    attacker who could reach the backend directly would authenticate as anyone
+    by sending two empty headers. Comparison is constant-time.
+    """
+    configured = settings.s2s_secret
+    if not configured:
+        raise AuthError("S2S auth is not enabled (WB_S2S_SECRET unset)")
+    if not secret or not hmac.compare_digest(secret, configured):
+        raise AuthError("bad S2S secret")
+    if not actor_did or not actor_did.startswith("did:"):
+        raise AuthError(f"S2S call needs a valid {S2S_ACTOR_HEADER} header")
+    return {"did": actor_did, "handle": actor_did}
+
+
+async def authenticate(
+    bearer: str | None, s2s_secret: str | None, actor_did: str | None
+) -> dict[str, str]:
+    """Resolve a caller's identity by whichever mechanism they presented.
+
+    S2S is checked first and only when a secret header is actually present, so
+    a browser's bearer token is never shadowed by it.
+    """
+    if s2s_secret is not None:
+        return validate_s2s(s2s_secret, actor_did)
+    if bearer:
+        return await validate_token(bearer)
+    raise AuthError("no credentials presented")

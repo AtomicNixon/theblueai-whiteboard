@@ -5,12 +5,12 @@ import logging
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import db, ws
 from .ai_trigger import extract_tags, schedule_ai_tagged
-from .auth import AuthError, validate_token
+from .auth import S2S_ACTOR_HEADER, S2S_SECRET_HEADER, AuthError, authenticate
 from .elements import normalize, strip_for_storage
 from .models import CanvasCreate, ElementIn, ElementUpdate
 from .serializers import canvas_out, element_out
@@ -21,12 +21,21 @@ security = HTTPBearer(auto_error=False)
 
 
 async def current_user(
+    request: Request,
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
 ) -> dict[str, str]:
-    if creds is None or creds.scheme.lower() != "bearer":
+    """Identity from either a browser's bearer token or a bsky-mcp S2S call.
+
+    AI agents arrive via bsky-mcp's wb_* tools, which hold no bearer token —
+    they present the shared secret plus the actor's DID instead. See
+    auth.authenticate.
+    """
+    s2s = request.headers.get(S2S_SECRET_HEADER)
+    bearer = creds.credentials if creds and creds.scheme.lower() == "bearer" else None
+    if s2s is None and bearer is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing bearer token")
     try:
-        return await validate_token(creds.credentials)
+        return await authenticate(bearer, s2s, request.headers.get(S2S_ACTOR_HEADER))
     except AuthError as e:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(e)) from e
 

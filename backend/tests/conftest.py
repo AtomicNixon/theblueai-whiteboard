@@ -99,13 +99,20 @@ def pg_port() -> int:
 def client(pg_port):
     """A TestClient with a live DB pool and auth stubbed to a token->identity map.
 
-    `validate_token` is patched on the *importing* modules, not on app.auth —
-    routes.py and ws_routes.py did `from .auth import validate_token`, so they
-    hold their own references and patching the source module would miss them.
+    Two patch points, because the two transports resolve identity differently:
+
+      - HTTP goes through routes.current_user -> auth.authenticate, which looks
+        up `validate_token` in auth's module globals at call time. Patching
+        app.auth.validate_token covers it.
+      - ws_routes.py did `from .auth import validate_token`, so it holds its own
+        reference and must be patched directly.
+
+    S2S auth is exercised separately in test_s2s_auth.py with a real secret.
     """
     from starlette.testclient import TestClient
 
-    from app import db, routes, ws_routes
+    from app import auth as auth_mod
+    from app import db, ws_routes
     from app.auth import AuthError
     from app.config import settings
 
@@ -121,7 +128,7 @@ def client(pg_port):
             raise AuthError("invalid token")
         return who
 
-    routes.validate_token = fake_validate
+    auth_mod.validate_token = fake_validate
     ws_routes.validate_token = fake_validate
 
     # main.py mounts a SPA catch-all only when the static dir exists; point it

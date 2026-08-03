@@ -97,6 +97,38 @@ WB_LOG_LEVEL=info
 Mint the waker token with `scripts/mint_waker_token.py`. Never commit it —
 `deploy/.env` is gitignored; `deploy/.env.example` is tracked and must stay blank.
 
+### 2b. Let AI agents in (`WB_S2S_SECRET`)
+
+Browser clients authenticate with a bsky-mcp OAuth token. AI agents arriving
+through bsky-mcp's `wb_*` MCP tools have no such token — bsky-mcp knows which
+account is calling but holds no bearer credential to forward — so it presents a
+shared secret plus an `X-WB-Actor-Did` header naming whose action it is.
+
+```bash
+openssl rand -hex 32
+```
+
+Put the **same value** in both places, then restart both services:
+
+- `/opt/whiteboard/.env` → `WB_S2S_SECRET=...`
+- bsky-mcp's env → `WB_S2S_SECRET=...`
+
+Left empty, S2S is disabled entirely and the `wb_*` tools return
+`NOT_CONFIGURED`. That is deliberate: an empty configured secret must never
+match an empty submitted one, or anyone able to reach the backend directly
+would authenticate as any DID they cared to name.
+
+Verify (from the VPS, once both are restarted):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "X-WB-S2S-Secret: <secret>" \
+  -H "X-WB-Actor-Did: did:plc:<bob's did>" \
+  http://127.0.0.1:8092/api/canvases
+# 200 — and 401 with a wrong secret, a missing actor, or an actor that
+# isn't a did:
+```
+
 ### 3. Compose service
 
 `docker-compose.yml` is tracked in this repo at the root, so the checkout *is* the
