@@ -76,10 +76,11 @@ async def create_account(handle: str, email: str, password: str,
                          invite_code: str) -> dict[str, str]:
     """Create an account on our PDS.
 
-    The PDS requires an invite code (PDS_INVITE_REQUIRED), which is deliberate:
-    this is a small server, not an open signup. We pass the user's code
-    straight through rather than holding admin credentials here — the
-    whiteboard has no business being able to mint accounts on its own.
+    Signup is open as of 2026-08-04 — PDS_INVITE_REQUIRED was turned off, on the
+    reasoning that Bluesky's own anti-spam machinery already does this job and
+    we'd rather discover we were wrong than gate the door on a guess. Any code
+    supplied is still passed through, so flipping it back on needs no change
+    here: the PDS becomes the one refusing, and its message reaches the user.
     """
     handle = handle.strip().lstrip("@").lower()
     if not handle:
@@ -108,8 +109,9 @@ async def create_account(handle: str, email: str, password: str,
         raise LoginError("That email address doesn't look right.")
     if len(password) < 8:
         raise LoginError("Use a password of at least 8 characters.")
-    if not invite_code.strip():
-        raise LoginError("An invite code is required to create an account here.")
+    # No invite check here on purpose: PDS_INVITE_REQUIRED was turned off on
+    # 2026-08-04, and the PDS is the authority either way. If it's ever switched
+    # back on, the PDS rejects the signup and its message is passed through.
 
     url = f"{settings.pds_url.rstrip('/')}/xrpc/com.atproto.server.createAccount"
     try:

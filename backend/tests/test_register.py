@@ -100,10 +100,31 @@ async def test_short_password_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_invite_code_required(monkeypatch):
-    stub_pds(monkeypatch)
-    with pytest.raises(pw.LoginError, match="invite"):
-        await pw.create_account("newbie", "a@b.com", "longenough", "   ")
+async def test_no_invite_code_needed(monkeypatch):
+    """Signup opened 2026-08-04. An empty code must not be refused here."""
+    cap: dict = {}
+    stub_pds(monkeypatch, capture=cap)
+    who = await pw.create_account("newbie", "a@b.com", "longenough", "")
+    assert who["did"] == CREATED["did"]
+    assert cap["json"]["inviteCode"] == ""
+
+
+@pytest.mark.asyncio
+async def test_invite_code_still_forwarded(monkeypatch):
+    """The PDS stays the authority. If invites are switched back on, a code
+    still reaches it and its refusal still reaches the user."""
+    cap: dict = {}
+    stub_pds(monkeypatch, capture=cap)
+    await pw.create_account("newbie", "a@b.com", "longenough", "  some-code  ")
+    assert cap["json"]["inviteCode"] == "some-code"
+
+
+@pytest.mark.asyncio
+async def test_pds_can_still_refuse_for_a_bad_invite(monkeypatch):
+    stub_pds(monkeypatch, status=400,
+             body={"error": "InvalidInviteCode", "message": "Provided invite code not available"})
+    with pytest.raises(pw.LoginError, match="invite code not available"):
+        await pw.create_account("newbie", "a@b.com", "longenough", "nope")
 
 
 # --- talking to the PDS -----------------------------------------------------

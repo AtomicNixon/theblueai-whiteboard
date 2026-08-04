@@ -144,8 +144,8 @@ export default function Home({ onSignedIn }: { onSignedIn: (s: string, h: string
               </Field>
 
               <Field label="Invite code"
-                     hint={<>Required. This isn't open signup — someone has to hand you a code.
-                       If you don't have one and think you should, ask the person who sent you here.</>}>
+                     hint={<>Optional — signup is open. If someone gave you a code, paste it;
+                       otherwise leave this empty.</>}>
                 <input style={inputStyle} value={invite}
                        autoCapitalize="none" autoCorrect="off" spellCheck={false}
                        placeholder="theblueai-org-xxxxx-xxxxx"
