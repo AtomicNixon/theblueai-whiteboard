@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Field, Footer, Page, ROUTES, buttonStyle, go, inputStyle } from './shared'
+import { Field, Footer, Hint, Page, ROUTES, buttonStyle, go, inputStyle } from './shared'
 
 /**
  * Sign in or create an account. Every field carries a note, because the people
@@ -17,7 +17,17 @@ export default function Home({ onSignedIn }: { onSignedIn: (s: string, h: string
   const [email, setEmail] = useState('')
   const [invite, setInvite] = useState('')
 
-  async function submit() {
+  /**
+   * One set of credentials, two places to end up.
+   *
+   * Both buttons do the same real sign-in — worth doing even for the Bluesky
+   * route, because a mistyped password is much better discovered here than
+   * after you've been handed off to another site.
+   *
+   * Note the same-tab navigation for Bluesky: window.open() after an `await`
+   * has lost its user-gesture context and popup blockers eat it.
+   */
+  async function submit(destination: 'whiteboard' | 'bluesky') {
     setBusy(true)
     setErr('')
     try {
@@ -33,6 +43,15 @@ export default function Home({ onSignedIn }: { onSignedIn: (s: string, h: string
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail ?? `Failed (${res.status})`)
       setPassword('')
+
+      if (destination === 'bluesky') {
+        // Bluesky is somebody else's site; we can't hand it a session. Save
+        // ours anyway so coming back here doesn't mean signing in twice.
+        localStorage.setItem('wb_token', data.session)
+        localStorage.setItem('wb_handle', data.handle)
+        window.location.href = 'https://bsky.app'
+        return
+      }
       onSignedIn(data.session, data.handle)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -84,7 +103,7 @@ export default function Home({ onSignedIn }: { onSignedIn: (s: string, h: string
                        autoCapitalize="none" autoCorrect="off" spellCheck={false}
                        placeholder="you.pds.theblueai.org"
                        onChange={(e) => setIdentifier(e.target.value)}
-                       onKeyDown={(e) => { if (e.key === 'Enter') void submit() }} />
+                       onKeyDown={(e) => { if (e.key === 'Enter') void submit('whiteboard') }} />
               </Field>
 
               <Field label="Password"
@@ -92,7 +111,7 @@ export default function Home({ onSignedIn }: { onSignedIn: (s: string, h: string
                        made an app password, that works too and is easier to revoke later.</>}>
                 <input style={inputStyle} type="password" value={password}
                        onChange={(e) => setPassword(e.target.value)}
-                       onKeyDown={(e) => { if (e.key === 'Enter') void submit() }} />
+                       onKeyDown={(e) => { if (e.key === 'Enter') void submit('whiteboard') }} />
               </Field>
             </>
           ) : (
@@ -131,14 +150,26 @@ export default function Home({ onSignedIn }: { onSignedIn: (s: string, h: string
                        autoCapitalize="none" autoCorrect="off" spellCheck={false}
                        placeholder="theblueai-org-xxxxx-xxxxx"
                        onChange={(e) => setInvite(e.target.value)}
-                       onKeyDown={(e) => { if (e.key === 'Enter') void submit() }} />
+                       onKeyDown={(e) => { if (e.key === 'Enter') void submit('whiteboard') }} />
               </Field>
             </>
           )}
 
-          <button onClick={() => void submit()} disabled={busy} style={buttonStyle}>
-            {busy ? 'Working…' : mode === 'in' ? 'Sign in' : 'Create account'}
-          </button>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 4 }}>
+            <button onClick={() => void submit('whiteboard')} disabled={busy}
+                    style={buttonStyle}>
+              {busy ? 'Working…' : 'Sign in → Whiteboard'}
+            </button>
+            <button onClick={() => void submit('bluesky')} disabled={busy}
+                    style={{ ...buttonStyle, background: '#fff', color: '#1971c2' }}>
+              {busy ? '…' : 'Sign in → Bluesky'}
+            </button>
+          </div>
+          <Hint>
+            Same account either way. Bluesky is a separate site, so it will ask
+            for your handle and password again when you get there — the same
+            ones you just typed.
+          </Hint>
 
           {err && (
             <p style={{ color: 'crimson', marginTop: 14, fontSize: 14, wordBreak: 'break-word' }}>
