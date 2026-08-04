@@ -106,6 +106,25 @@ CREATE TABLE IF NOT EXISTS oauth_auth_request (
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Images. Excalidraw keeps binary in a separate BinaryFiles map keyed by
+-- fileId, not on the element, so we mirror that rather than stuffing a data
+-- URI inside element JSON.
+--
+-- The browser downscales and re-encodes to JPEG before upload, so what lands
+-- here is bounded by construction: a 12 MP phone photo and a screenshot cost
+-- roughly the same. That bound is the whole point — an unbounded blob store on
+-- a 2 GB box shared with a PDS and a Postgres is how you lose a weekend.
+CREATE TABLE IF NOT EXISTS canvas_files (
+    canvas_id   TEXT NOT NULL REFERENCES canvases(id) ON DELETE CASCADE,
+    file_id     TEXT NOT NULL,
+    mime_type   TEXT NOT NULL DEFAULT 'image/jpeg',
+    data_url    TEXT NOT NULL,
+    owner_did   TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (canvas_id, file_id)
+);
+CREATE INDEX IF NOT EXISTS idx_canvas_files_canvas ON canvas_files(canvas_id);
+
 -- Whiteboard sessions. We store a SHA-256 of the token, never the token
 -- itself, so a database leak doesn't hand over live sessions.
 CREATE TABLE IF NOT EXISTS wb_session (
@@ -377,4 +396,59 @@ async def prune_sessions() -> int:
     pool = get_pool()
     async with pool.acquire() as conn:
         res = await conn.execute("DELETE FROM wb_session WHERE expires_at <= now()")
+    return int(res.rsplit(" ", 1)[-1] or 0)
+
+
+# --- Images ---
+
+
+async def put_file(canvas_id: str, file_id: str, mime_type: str,
+                   data_url: str, owner_did: str) -> None:
+    """Store an image for a canvas. Idempotent — the same paste may arrive twice."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO canvas_files (canvas_id, file_id, mime_type, data_url, owner_did) "
+            "VALUES ($1, $2, $3, $4, $5) "
+            "ON CONFLICT (canvas_id, file_id) DO NOTHING",
+            canvas_id, file_id, mime_type, data_url, owner_did,
+        )
+
+
+async def get_files(canvas_id: str) -> list[dict[str, Any]]:
+    """Every image on a canvas, in Excalidraw's BinaryFiles shape."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT file_id, mime_type, data_url FROM canvas_files WHERE canvas_id = $1",
+            canvas_id,
+        )
+    return [{"id": r["file_id"], "mimeType": r["mime_type"], "dataURL": r["data_url"]}
+            for r in rows]
+
+
+async def canvas_files_bytes(canvas_id: str) -> int:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT COALESCE(SUM(LENGTH(data_url)), 0) AS n FROM canvas_files WHERE canvas_id = $1",
+            canvas_id,
+        )
+    return int(row["n"])
+
+
+async def delete_orphan_files(canvas_id: str) -> int:
+    """Drop images no element references any more.
+
+    Deleting an image element leaves its file behind; without this a canvas
+    would accumulate the bytes of every picture ever pasted into it.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "DELETE FROM canvas_files f WHERE f.canvas_id = $1 AND NOT EXISTS ("
+            "  SELECT 1 FROM canvas_elements e"
+            "  WHERE e.canvas_id = f.canvas_id AND e.data->>'fileId' = f.file_id)",
+            canvas_id,
+        )
     return int(res.rsplit(" ", 1)[-1] or 0)

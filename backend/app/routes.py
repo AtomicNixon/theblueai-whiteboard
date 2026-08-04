@@ -12,16 +12,22 @@ from . import db, ws
 from .ai_trigger import extract_tags, schedule_ai_tagged
 from .auth import S2S_ACTOR_HEADER, S2S_SECRET_HEADER, AuthError, authenticate
 from .elements import is_ephemeral, normalize, strip_for_storage
-from .models import CanvasCreate, ElementIn, ElementsIn, ElementUpdate
+from .models import CanvasCreate, ElementIn, ElementsIn, ElementUpdate, FileIn
 from .serializers import canvas_out, element_out
 
 log = logging.getLogger("whiteboard.http")
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
-# A vectorized image is a few hundred rectangles. This bounds a single request
-# so one paste can't be used to push thousands of rows in at once.
+# Bounds a single bulk request so one paste can't push thousands of rows at once.
 MAX_BULK = 1000
+
+# Image ceilings, in data-URL characters (base64, so ~4/3 of the real bytes).
+# The browser downscales to ~1200px and re-encodes at JPEG q80 before sending,
+# which normally lands well under these; they exist so a hand-rolled client
+# can't fill the disk.
+MAX_FILE_CHARS = 1_500_000          # ~1.1 MB of actual image
+MAX_CANVAS_FILE_CHARS = 24_000_000  # ~18 MB per canvas
 
 
 async def current_user(
@@ -93,6 +99,54 @@ async def restore_canvas(user: UserDep, canvas_id: str) -> dict:
     return {"id": canvas_id, "status": "active"}
 
 
+@router.post("/canvases/{canvas_id}/files")
+async def upload_file(user: UserDep, canvas_id: str, body: FileIn) -> dict:
+    """Store an image for a canvas.
+
+    The browser downscales and re-encodes to JPEG first, so the size ceiling
+    here is a backstop rather than the primary bound — but it is a real one:
+    without it a single paste could put an arbitrary number of megabytes into
+    Postgres on a 2 GB box.
+    """
+    c = await db.get_canvas(canvas_id)
+    if c is None:
+        raise HTTPException(404, "canvas not found")
+    if c["status"] != "active":
+        raise HTTPException(409, "canvas is archived")
+
+    if not body.dataURL.startswith("data:image/"):
+        raise HTTPException(400, "not an image data URL")
+    if len(body.dataURL) > MAX_FILE_CHARS:
+        raise HTTPException(
+            413,
+            f"Image is {len(body.dataURL) // 1024} KB after compression; "
+            f"the limit is {MAX_FILE_CHARS // 1024} KB.",
+        )
+
+    used = await db.canvas_files_bytes(canvas_id)
+    if used + len(body.dataURL) > MAX_CANVAS_FILE_CHARS:
+        raise HTTPException(
+            413,
+            f"This canvas is already holding {used // 1024} KB of images "
+            f"(limit {MAX_CANVAS_FILE_CHARS // 1024} KB). Delete some first.",
+        )
+
+    await db.put_file(canvas_id, body.id, body.mimeType, body.dataURL, user["did"])
+    await ws.broadcast(canvas_id, {
+        "op": "file",
+        "file": {"id": body.id, "mimeType": body.mimeType, "dataURL": body.dataURL},
+    })
+    return {"id": body.id, "bytes": len(body.dataURL)}
+
+
+@router.post("/canvases/{canvas_id}/files/gc")
+async def gc_files(user: UserDep, canvas_id: str) -> dict:
+    """Drop images no element references. Called after deletions."""
+    if await db.get_canvas(canvas_id) is None:
+        raise HTTPException(404, "canvas not found")
+    return {"removed": await db.delete_orphan_files(canvas_id)}
+
+
 @router.get("/canvases/{canvas_id}/snapshot")
 async def get_snapshot(user: UserDep, canvas_id: str) -> dict:
     snap = await db.get_canvas_snapshot(canvas_id)
@@ -102,6 +156,9 @@ async def get_snapshot(user: UserDep, canvas_id: str) -> dict:
     return {
         "canvas": canvas_out(snap["canvas"]),
         "elements": [element_out(e) for e in snap["elements"]],
+        # Excalidraw needs these handed to addFiles() before an image element
+        # will render; the element only carries a fileId.
+        "files": await db.get_files(canvas_id),
         "me": user["did"],
     }
 
@@ -116,14 +173,14 @@ async def add_element(user: UserDep, canvas_id: str, body: ElementIn) -> dict:
         raise HTTPException(404, "canvas not found")
     if c["status"] != "active":
         raise HTTPException(409, "canvas is archived")
-    if is_ephemeral(body.data):
-        # Reaching here means an out-of-date client: the browser converts images
-        # to shapes before they ever reach us (frontend/src/vectorize.ts). Say so,
-        # because the fix is a reload, not anything the user did wrong.
+    if is_ephemeral(body.data) and not await db.get_files(canvas_id):
+        # An image element whose file we've never seen. Either the upload failed
+        # or this is an out-of-date client; either way it would render as a
+        # broken placeholder forever.
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Images are converted to shapes in the browser, not stored. "
-            "Your page is running an older version — reload to pick up the current one.",
+            "Upload the image before its element (POST .../files). "
+            "If you didn't do this by hand, reload the page.",
         )
 
     eid = uuid.uuid4().hex

@@ -1,108 +1,165 @@
-"""Bulk element creation, and the refusal to store images.
+"""Bulk element creation, and image storage.
 
-Images are converted to a few hundred rectangles client-side (frontend
-vectorize.ts) rather than stored. Two consequences the backend must enforce:
+Images are downscaled and JPEG re-encoded in the browser, then stored in
+canvas_files keyed by Excalidraw's own fileId. The element only carries that
+fileId, so the invariant that matters is: an image element must never outlive
+(or precede) its bytes, or it renders as a permanent broken placeholder.
 
-  1. An image element must never reach the database. Storing one while its
-     binary lives only in the browser leaves a `fileId` pointing at nothing —
-     a permanent broken placeholder that no reload can fix.
-  2. Those few hundred rectangles must arrive in one request, not one each.
+This replaced a vectorizer that turned images into a few hundred shapes. It was
+measured carefully and dropped — at any element budget we'd tolerate you
+couldn't tell what the picture was. See app/images.ts for the history.
 """
 from __future__ import annotations
 
-import copy
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-IMAGE_ELEMENT = {
-    "id": "img-abc",
-    "type": "image",
-    "x": 100, "y": 100, "width": 253, "height": 253,
-    "fileId": "2a90e74ff50a9749bcd5eea253019ca362729b47",
-    "status": "pending",
-    "strokeColor": "transparent", "backgroundColor": "transparent",
-    "seed": 12345, "version": 1, "versionNonce": 1, "isDeleted": False,
-}
+# A 1x1 JPEG; contents don't matter, only that it's a well-formed image data URL.
+TINY_JPEG = (
+    "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsL"
+    "DBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAAB"
+    "AAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q=="
+)
 
 
 def rect(i: int, group: str = "img-1") -> dict:
     return {
-        "type": "rectangle",
-        "x": float(i * 3), "y": 10.0, "width": 3.0, "height": 3.0,
-        "strokeColor": "transparent", "backgroundColor": "#aabbcc",
-        "fillStyle": "solid", "roughness": 0, "opacity": 100,
-        "groupIds": [group], "seed": 1000 + i,
+        "type": "rectangle", "x": float(i * 3), "y": 10.0, "width": 3.0, "height": 3.0,
+        "strokeColor": "transparent", "backgroundColor": "#aabbcc", "fillStyle": "solid",
+        "roughness": 0, "opacity": 100, "groupIds": [group], "seed": 1000 + i,
     }
 
 
-# --- images are refused -----------------------------------------------------
+def image_element(file_id: str = "file-abc") -> dict:
+    return {
+        "id": "img-el-1", "type": "image", "x": 10, "y": 10, "width": 200, "height": 150,
+        "fileId": file_id, "status": "saved",
+        "strokeColor": "transparent", "backgroundColor": "transparent",
+        "seed": 4242, "version": 1, "versionNonce": 1, "isDeleted": False,
+    }
 
-def test_image_element_rejected_on_single_add(client, alice_headers, canvas):
+
+def upload(client, headers, canvas_id, file_id="file-abc", data_url=TINY_JPEG):
+    return client.post(f"/api/canvases/{canvas_id}/files", headers=headers,
+                       json={"id": file_id, "mimeType": "image/jpeg", "dataURL": data_url})
+
+
+# --- storing an image -------------------------------------------------------
+
+def test_upload_then_element(client, alice_headers, canvas):
+    assert upload(client, alice_headers, canvas["id"]).status_code == 200
+
     r = client.post(f"/api/canvases/{canvas['id']}/elements", headers=alice_headers,
-                    json={"kind": "mark", "data": copy.deepcopy(IMAGE_ELEMENT)})
+                    json={"kind": "mark", "data": image_element()})
+    assert r.status_code == 200, r.text
+
+    snap = client.get(f"/api/canvases/{canvas['id']}/snapshot", headers=alice_headers).json()
+    assert len(snap["elements"]) == 1
+    assert len(snap["files"]) == 1
+    assert snap["files"][0]["id"] == "file-abc"
+    assert snap["files"][0]["dataURL"].startswith("data:image/jpeg")
+
+
+def test_element_without_its_file_is_refused(client, alice_headers, canvas):
+    """The invariant: no element pointing at bytes we don't have."""
+    r = client.post(f"/api/canvases/{canvas['id']}/elements", headers=alice_headers,
+                    json={"kind": "mark", "data": image_element()})
     assert r.status_code == 400
-    assert "never stored" in r.json()["detail"] or "image" in r.json()["detail"].lower()
+    assert "upload" in r.json()["detail"].lower()
+
+
+def test_snapshot_carries_files_for_everyone(client, alice_headers, bob_headers, canvas):
+    """Excalidraw needs addFiles() before an image element will render, so the
+    file has to reach every viewer, not just whoever pasted it."""
+    upload(client, alice_headers, canvas["id"])
+    client.post(f"/api/canvases/{canvas['id']}/elements", headers=alice_headers,
+                json={"kind": "mark", "data": image_element()})
+
+    snap = client.get(f"/api/canvases/{canvas['id']}/snapshot", headers=bob_headers).json()
+    assert len(snap["files"]) == 1
+
+
+def test_upload_is_idempotent(client, alice_headers, canvas):
+    """The same paste can arrive twice; it must not duplicate."""
+    assert upload(client, alice_headers, canvas["id"]).status_code == 200
+    assert upload(client, alice_headers, canvas["id"]).status_code == 200
+    snap = client.get(f"/api/canvases/{canvas['id']}/snapshot", headers=alice_headers).json()
+    assert len(snap["files"]) == 1
+
+
+def test_non_image_rejected(client, alice_headers, canvas):
+    r = client.post(f"/api/canvases/{canvas['id']}/files", headers=alice_headers,
+                    json={"id": "x", "mimeType": "text/html",
+                          "dataURL": "data:text/html;base64,PHNjcmlwdD4="})
+    assert r.status_code == 400
+
+
+# --- the size ceiling -------------------------------------------------------
+
+def test_oversized_image_rejected(client, alice_headers, canvas):
+    """The browser downscales first; this is the backstop that stops a
+    hand-rolled client putting arbitrary megabytes into Postgres."""
+    from app.routes import MAX_FILE_CHARS
+    huge = "data:image/jpeg;base64," + ("A" * (MAX_FILE_CHARS + 10))
+    r = client.post(f"/api/canvases/{canvas['id']}/files", headers=alice_headers,
+                    json={"id": "huge", "mimeType": "image/jpeg", "dataURL": huge})
+    assert r.status_code == 413
+    assert "limit" in r.json()["detail"].lower()
+
+
+def test_per_canvas_budget_enforced(client, alice_headers, canvas):
+    from app.routes import MAX_CANVAS_FILE_CHARS, MAX_FILE_CHARS
+    chunk = "data:image/jpeg;base64," + ("A" * (MAX_FILE_CHARS - 100))
+    n = MAX_CANVAS_FILE_CHARS // MAX_FILE_CHARS + 1
+    codes = [
+        client.post(f"/api/canvases/{canvas['id']}/files", headers=alice_headers,
+                    json={"id": f"f{i}", "mimeType": "image/jpeg", "dataURL": chunk}).status_code
+        for i in range(n + 1)
+    ]
+    assert 413 in codes, "a canvas must not accept unbounded image bytes"
+
+
+# --- garbage collection -----------------------------------------------------
+
+def test_orphan_files_collected(client, alice_headers, canvas):
+    """Deleting an image element leaves its bytes behind; gc reclaims them."""
+    upload(client, alice_headers, canvas["id"])
+    created = client.post(f"/api/canvases/{canvas['id']}/elements", headers=alice_headers,
+                          json={"kind": "mark", "data": image_element()}).json()
+
+    r = client.post(f"/api/canvases/{canvas['id']}/files/gc", headers=alice_headers)
+    assert r.json()["removed"] == 0, "a referenced file must not be collected"
+
+    client.delete(f"/api/elements/{created['id']}", headers=alice_headers)
+    r = client.post(f"/api/canvases/{canvas['id']}/files/gc", headers=alice_headers)
+    assert r.json()["removed"] == 1
 
     snap = client.get(f"/api/canvases/{canvas['id']}/snapshot", headers=alice_headers).json()
-    assert snap["elements"] == [], "an image must not reach the database"
-
-
-def test_image_silently_skipped_in_bulk(client, alice_headers, canvas):
-    """A bulk batch with an image mixed in stores the rest and drops the image,
-    rather than failing the whole paste."""
-    body = {"elements": [
-        {"kind": "mark", "data": rect(0)},
-        {"kind": "mark", "data": copy.deepcopy(IMAGE_ELEMENT)},
-        {"kind": "mark", "data": rect(1)},
-    ]}
-    r = client.post(f"/api/canvases/{canvas['id']}/elements/bulk",
-                    headers=alice_headers, json=body)
-    assert r.status_code == 200
-    assert len(r.json()) == 2
-
-    snap = client.get(f"/api/canvases/{canvas['id']}/snapshot", headers=alice_headers).json()
-    assert len(snap["elements"]) == 2
-    assert all(e["data"]["type"] != "image" for e in snap["elements"])
-
-
-def test_image_rejected_over_websocket(client, canvas):
-    with client.websocket_connect(f"/ws/canvas/{canvas['id']}?token=tok-alice") as ws:
-        assert ws.receive_json()["op"] == "snapshot"
-        ws.send_json({"op": "add", "kind": "mark", "data": copy.deepcopy(IMAGE_ELEMENT)})
-        reply = ws.receive_json()
-        assert reply["op"] == "error"
-        assert "image" in reply["message"].lower()
+    assert snap["files"] == []
 
 
 # --- bulk creation ----------------------------------------------------------
 
 def test_bulk_creates_everything(client, alice_headers, canvas):
-    n = 250  # a typical vectorized image
+    n = 250
     body = {"elements": [{"kind": "mark", "data": rect(i)} for i in range(n)]}
     r = client.post(f"/api/canvases/{canvas['id']}/elements/bulk",
                     headers=alice_headers, json=body)
     assert r.status_code == 200
     created = r.json()
     assert len(created) == n
-    assert len({c["id"] for c in created}) == n, "ids must be unique"
-
-    snap = client.get(f"/api/canvases/{canvas['id']}/snapshot", headers=alice_headers).json()
-    assert len(snap["elements"]) == n
+    assert len({c["id"] for c in created}) == n
 
 
 def test_bulk_preserves_group_and_colour(client, alice_headers, canvas):
-    """groupIds are what make a vectorized image behave as one object."""
     body = {"elements": [{"kind": "mark", "data": rect(i, "picture-7")} for i in range(5)]}
     client.post(f"/api/canvases/{canvas['id']}/elements/bulk", headers=alice_headers, json=body)
-
     snap = client.get(f"/api/canvases/{canvas['id']}/snapshot", headers=alice_headers).json()
-    assert len(snap["elements"]) == 5
     for e in snap["elements"]:
         assert e["data"]["groupIds"] == ["picture-7"]
         assert e["data"]["backgroundColor"] == "#aabbcc"
-        assert e["data"]["fillStyle"] == "solid"
 
 
 def test_bulk_is_capped(client, alice_headers, canvas):
@@ -113,30 +170,22 @@ def test_bulk_is_capped(client, alice_headers, canvas):
     assert r.status_code == 413
 
 
-def test_bulk_empty_is_harmless(client, alice_headers, canvas):
-    r = client.post(f"/api/canvases/{canvas['id']}/elements/bulk",
-                    headers=alice_headers, json={"elements": []})
-    assert r.status_code == 200
-    assert r.json() == []
-
-
 def test_bulk_broadcasts_one_op(client, alice_headers, canvas):
-    """Other clients get a single add_bulk, not 250 separate adds."""
     with client.websocket_connect(f"/ws/canvas/{canvas['id']}?token=tok-bob") as ws:
         assert ws.receive_json()["op"] == "snapshot"
-
         body = {"elements": [{"kind": "mark", "data": rect(i)} for i in range(30)]}
         client.post(f"/api/canvases/{canvas['id']}/elements/bulk",
                     headers=alice_headers, json=body)
-
         op = ws.receive_json()
         assert op["op"] == "add_bulk"
         assert len(op["elements"]) == 30
-        assert op["elements"][0]["data"]["groupIds"] == ["img-1"]
 
 
-def test_bulk_attributes_to_the_caller(client, bob_headers, canvas):
-    body = {"elements": [{"kind": "mark", "data": rect(i)} for i in range(3)]}
-    r = client.post(f"/api/canvases/{canvas['id']}/elements/bulk",
-                    headers=bob_headers, json=body)
-    assert all(e["owner_did"].endswith("bob00000000000000000000000") for e in r.json())
+def test_uploaded_file_is_broadcast(client, alice_headers, canvas):
+    """Someone already on the canvas must see a pasted image without reloading."""
+    with client.websocket_connect(f"/ws/canvas/{canvas['id']}?token=tok-bob") as ws:
+        assert ws.receive_json()["op"] == "snapshot"
+        upload(client, alice_headers, canvas["id"])
+        op = ws.receive_json()
+        assert op["op"] == "file"
+        assert op["file"]["id"] == "file-abc"

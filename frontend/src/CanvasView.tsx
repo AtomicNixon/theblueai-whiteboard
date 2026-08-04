@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Excalidraw, CaptureUpdateAction } from '@excalidraw/excalidraw'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import type { CanvasOut, ElementOut, SnapshotOut, WsOp } from './types'
-import { vectorizeImage } from './vectorize'
+import { formatKB, shrinkImage } from './images'
 
 /**
  * CanvasView wires Excalidraw (drawing surface) to our own WebSocket transport.
@@ -85,15 +85,12 @@ function backendToExc(el: ElementOut, me?: string): ExcalidrawElement {
 interface ExcAPI {
   updateScene: (opts: { elements: ExcalidrawElement[]; captureUpdate: string }) => void
   getSceneElements: () => ExcalidrawElement[]
+  addFiles: (files: BinaryFile[]) => void
 }
 
 /** Excalidraw holds image binary here, keyed by the element's `fileId`. */
 interface BinaryFile { id: string; mimeType: string; dataURL: string }
 type BinaryFiles = Record<string, BinaryFile>
-
-/** Element budget for a dropped image. See vectorize.ts for why we redraw
- *  pictures instead of storing them. */
-const IMAGE_ELEMENTS = 250
 
 interface KnownInfo { v: number; wbid?: string }
 
@@ -120,9 +117,10 @@ export default function CanvasView({
   })
   const flushTimer = useRef<number | null>(null)
   const disposedRef = useRef(false)
-  // Image elements already converted, so onChange doesn't re-run the quadtree
-  // on every subsequent event.
+  // Images whose upload has been started / finished, so onChange doesn't
+  // re-upload on every subsequent event.
   const imagesHandledRef = useRef<Set<string>>(new Set())
+  const imagesUploadedRef = useRef<Set<string>>(new Set())
 
   // Apply a full element list to the scene (snapshot/remote ops/stamping wbid).
   // After updateScene normalizes elements, rebuild the baseline so the onChange
@@ -221,32 +219,45 @@ export default function CanvasView({
   }
 
   /**
-   * A dropped or pasted image becomes a few hundred rectangles.
+   * A dropped image is downscaled, re-encoded as JPEG, and uploaded before its
+   * element is allowed to persist.
    *
-   * We never store pictures — see vectorize.ts. The image element is removed
-   * from the scene and replaced by its approximation, which is made of ordinary
-   * marks and therefore syncs and persists with no special handling. Every
-   * rectangle shares a groupId, so it still behaves like one object.
+   * Order matters: the element only carries a `fileId`, so if the element were
+   * saved first and the upload then failed, every future load would render a
+   * broken placeholder pointing at bytes that don't exist. Upload, then let the
+   * normal flush save the element.
    */
-  async function vectorizeAndReplace(el: ExcalidrawElement, file: BinaryFile) {
-    const api = excalidrawAPIRef.current
-    if (!api) return
+  async function shrinkAndUpload(el: ExcalidrawElement, file: BinaryFile) {
+    // NB: not named `api` — that would shadow the module-level fetch helper.
+    const editorApi = excalidrawAPIRef.current
+    if (!editorApi) return
     try {
-      const rects = await vectorizeImage(
-        file.dataURL,
-        { x: el.x, y: el.y, width: el.width, height: el.height },
-        { maxElements: IMAGE_ELEMENTS },
-      )
+      const shrunk = await shrinkImage(file.dataURL)
       if (disposedRef.current) return
 
-      // Drop the image element, add the approximation. These are brand-new
-      // local elements with no wbid, so the normal flush persists them.
-      const scene = api.getSceneElements().filter((e) => e.id !== el.id)
-      applyScene([...scene, ...(rects as unknown as ExcalidrawElement[])])
+      await api<{ id: string }>(`/canvases/${canvas.id}/files`, token, {
+        method: 'POST',
+        body: JSON.stringify({
+          id: file.id,
+          mimeType: shrunk.mimeType,
+          dataURL: shrunk.dataURL,
+        }),
+      })
+
+      // Swap the browser's full-size copy for the shrunk one so what everyone
+      // sees is what's actually stored.
+      editorApi.addFiles([{ ...file, mimeType: shrunk.mimeType, dataURL: shrunk.dataURL }])
+      imagesUploadedRef.current.add(el.id)
+
+      if (shrunk.originalBytes > shrunk.bytes * 1.2) {
+        setErr(`image ${formatKB(shrunk.originalBytes)} → ${formatKB(shrunk.bytes)}`)
+        window.setTimeout(() => setErr(''), 4000)
+      }
     } catch (e) {
-      setErr(`could not convert that image: ${e instanceof Error ? e.message : String(e)}`)
-      // Leave the image in place rather than silently eating it; it won't
-      // persist, but the user can see that something went wrong.
+      const msg = e instanceof Error ? e.message : String(e)
+      setErr(`couldn't store that image: ${msg}`)
+      // Remove it rather than leave an element that can never render.
+      applyScene(editorApi.getSceneElements().filter((s) => s.id !== el.id))
     }
   }
 
@@ -258,17 +269,19 @@ export default function CanvasView({
     for (const el of arr) {
       seen.add(el.id)
 
-      // Images are converted, never stored. Excalidraw adds the element before
-      // its binary finishes loading, so wait for the file to appear (onChange
-      // fires again when it does).
+      // Excalidraw adds an image element before its binary finishes loading,
+      // so wait for the file to appear (onChange fires again when it does).
+      // The element is held back until the upload succeeds — see
+      // shrinkAndUpload for why order matters.
       if (el.type === 'image' && !el.isDeleted) {
         const fileId = (el as unknown as { fileId?: string }).fileId
         const file = fileId && files ? files[fileId] : undefined
         if (file?.dataURL && !imagesHandledRef.current.has(el.id)) {
           imagesHandledRef.current.add(el.id)
-          void vectorizeAndReplace(el, file)
+          void shrinkAndUpload(el, file)
         }
-        continue // never queue an image element for the server
+        if (!imagesUploadedRef.current.has(el.id)) continue
+        // Upload done — fall through and let it persist like any other element.
       }
       const info = knownRef.current.get(el.id)
       const wbid = (el as any).customData?.wbid as string | undefined
@@ -317,6 +330,9 @@ export default function CanvasView({
       .then((snap) => {
         if (cancelled) return
         myDidRef.current = snap.me
+        // Files must be registered before their elements render, or the image
+        // draws as a broken placeholder.
+        if (snap.files?.length) excalidrawAPIRef.current?.addFiles(snap.files)
         applyScene(snap.elements.map((e) => backendToExc(e, snap.me)))
       })
       .catch((e) => { if (!cancelled) setErr(String(e)) })
@@ -328,6 +344,10 @@ export default function CanvasView({
       const op = JSON.parse(ev.data) as WsOp
       const editorApi = excalidrawAPIRef.current
       if (!editorApi) return
+      if (op.op === 'file') {
+        editorApi.addFiles([op.file])
+        return
+      }
       if (op.op === 'snapshot') {
         myDidRef.current = op.me
         applyScene(op.elements.map((e) => backendToExc(e, op.me)))

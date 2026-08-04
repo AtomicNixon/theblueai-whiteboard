@@ -23,6 +23,17 @@ class ElementIn(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class FileIn(BaseModel):
+    """An image, in Excalidraw's BinaryFile shape.
+
+    `id` is Excalidraw's own fileId, which the element references. dataURL is
+    already downscaled and JPEG-compressed by the browser.
+    """
+    id: str
+    mimeType: str = "image/jpeg"
+    dataURL: str
+
+
 class ElementsIn(BaseModel):
     """Bulk create — a vectorized image arrives as hundreds of rectangles."""
     elements: list[ElementIn] = Field(default_factory=list)
