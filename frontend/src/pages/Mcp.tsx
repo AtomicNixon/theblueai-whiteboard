@@ -17,22 +17,31 @@ const TOOLS: Array<[string, string, string]> = [
   ['bsky_get_profile', 'read', 'Handle, DID, counts, labels, follow state.'],
   ['bsky_search_posts', 'read', 'Search public posts.'],
   ['bsky_whoami', 'read', 'Which account am I acting as?'],
-  ['bsky_policy_status', 'read', "Today's counters against the ceilings, and the pending queue."],
-  ['bsky_consent_pending', 'read', 'Actions waiting for a human to approve.'],
-  ['bsky_like', 'direct', 'Like a post. No approval needed.'],
-  ['bsky_repost', 'direct', 'Repost. No approval needed.'],
-  ['bsky_reply', 'direct', 'Reply. The server fetches the parent to build the reply reference.'],
-  ['bsky_post', 'queued', 'A new top-level post. Waits for approval by default.'],
-  ['bsky_follow', 'queued', 'Follow someone. Waits for approval.'],
-  ['bsky_unfollow', 'queued', 'Unfollow. Waits for approval.'],
-  ['bsky_delete_post', 'queued', "Delete one of your own posts. Waits for approval."],
+  ['bsky_policy_status', 'read', "Today's counters against the ceilings."],
+  ['bsky_consent_pending', 'read', 'Anything held for approval. Normally empty.'],
+  ['bsky_post', 'write', 'A new top-level post.'],
+  ['bsky_reply', 'write', 'Reply. The server fetches the parent to build the reply reference.'],
+  ['bsky_like', 'write', 'Like a post.'],
+  ['bsky_repost', 'write', 'Repost.'],
+  ['bsky_follow', 'write', 'Follow an account.'],
+  ['bsky_unfollow', 'write', 'Unfollow.'],
+  ['bsky_delete_post', 'write', 'Delete one of your own posts. Refuses anyone else’s.'],
+]
+
+/** The limits that are actually enforced, read off the live server. */
+const CEILINGS: Array<[string, string]> = [
+  ['Posts', '10 / day'],
+  ['Replies', '30 / day, 5 per thread'],
+  ['Likes', '60 / day'],
+  ['Reposts', '10 / day'],
+  ['Follows', '5 / day'],
+  ['Any write', 'no more than one per 20 seconds'],
 ]
 
 const badge = (kind: string) => {
   const colours: Record<string, [string, string]> = {
     read: ['#e7f5ff', '#1971c2'],
-    direct: ['#ebfbee', '#2f9e44'],
-    queued: ['#fff4e6', '#e8590c'],
+    write: ['#fff4e6', '#e8590c'],
   }
   const [bg, fg] = colours[kind] ?? ['#f1f3f5', '#495057']
   return (
@@ -47,7 +56,7 @@ export default function Mcp() {
   return (
     <Page title="The Bluesky MCP server"
           current={ROUTES.mcp}
-          subtitle="Lets an AI use a Bluesky account — with a leash on it.">
+          subtitle="Lets an AI use a Bluesky account, inside limits it can't raise.">
 
       <h2 style={h2}>What it is</h2>
       <p>
@@ -69,25 +78,54 @@ export default function Mcp() {
         anyone can wrap an API — it's the <strong>policy engine</strong> sitting
         in front of them.
       </p>
-      <p>Every action is one of three kinds, and the kind is decided by the server, not the caller:</p>
-      <ul style={{ fontSize: 15, lineHeight: 1.8 }}>
-        <li>{badge('read')} — happens immediately. Reading costs nothing and harms nobody.</li>
-        <li>{badge('direct')} — happens immediately, but it's a write. Likes, reposts, replies.</li>
-        <li>
-          {badge('queued')} — <strong>does not happen</strong> until a human approves it.
-          The tool returns "queued", and it sits in a list until someone says yes.
-        </li>
-      </ul>
+
+      <h2 style={h2}>What actually holds it back</h2>
       <p>
-        New posts, follows, unfollows and deletions are queued by default. So an
-        AI can carry on a conversation on its own, and cannot start broadcasting
-        or reshape who it follows without a person agreeing to it. There are also
-        daily ceilings, visible any time via{' '}
-        <span style={code}>bsky_policy_status</span>.
+        Rate ceilings, enforced by the server, and not adjustable by the caller.
+        Reads are free; every write is counted and refused past the line.
+      </p>
+      <table style={{ borderCollapse: 'collapse', marginTop: 12, fontSize: 15 }}>
+        <tbody>
+          {CEILINGS.map(([k, v]) => (
+            <tr key={k} style={{ borderBottom: '1px solid #f1f3f5' }}>
+              <td style={{ padding: '8px 28px 8px 0', fontWeight: 600 }}>{k}</td>
+              <td style={{ padding: '8px 0', color: '#495057' }}>{v}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p style={{ marginTop: 14 }}>
+        Ten posts a day is not a broadcast channel. Five follows a day cannot
+        reshape a social graph. And the twenty-second floor between writes means
+        nothing here can move faster than a person could read it.
+        <span style={code}>bsky_policy_status</span> shows the counters at any
+        time.
+      </p>
+
+      <h2 style={h2}>There used to be a consent queue</h2>
+      <p>
+        Posts and follows were originally held until a human approved them. That
+        was removed deliberately, and the reason is worth stating because it
+        looks like a weakening and isn't quite.
+      </p>
+      <p>
+        <strong>An approval queue nobody drains is worse than no queue.</strong>{' '}
+        It converts a live limit into a growing pile, and the pile gets waved
+        through in batches by someone who has stopped reading it. We had exactly
+        that happen elsewhere in this project — thirty-three items accumulated
+        over a week before anyone looked. Ceilings don't rot. They're the same on
+        day one and day four hundred, they need no attention to keep working, and
+        they can't be defeated by an impatient human clicking approve.
       </p>
       <p style={{ color: '#868e96', fontSize: 14 }}>
-        This is the same idea as the whiteboard's ownership rules: make the
-        limits structural, so nobody has to remember to be careful.
+        The machinery is still there —{' '}
+        <span style={code}>bsky_consent_pending</span> still exists and normally
+        returns nothing. It can be switched back on per action if there's ever a
+        reason.
+      </p>
+      <p style={{ color: '#868e96', fontSize: 14 }}>
+        Same principle as the whiteboard's ownership rules: make the limit
+        structural, so nobody has to remember to be careful.
       </p>
 
       <h2 style={h2}>The tools</h2>
