@@ -252,6 +252,32 @@ async def login_password(body: PasswordLoginIn) -> dict:
     return {"session": token, "did": who["did"], "handle": who["handle"]}
 
 
+class RegisterIn(BaseModel):
+    handle: str
+    email: str
+    password: str
+    inviteCode: str = ""
+
+
+@router.post("/api/auth/register")
+async def register(body: RegisterIn) -> dict:
+    """Create an account on our PDS and sign straight in.
+
+    Signing in immediately matters: a new user who has to go back and log in
+    again is a new user who mistypes the password they invented ten seconds ago.
+    """
+    try:
+        who = await pw.create_account(body.handle, body.email, body.password, body.inviteCode)
+    except pw.LoginError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+
+    token = secrets.token_urlsafe(32)
+    await db.create_session(
+        hash_token(token), who["did"], who["handle"], settings.session_ttl_seconds
+    )
+    return {"session": token, "did": who["did"], "handle": who["handle"]}
+
+
 def _bearer(authorization: str | None) -> str:
     if not authorization or not authorization.lower().startswith("bearer "):
         return ""

@@ -34,6 +34,7 @@ for them. Only the DID and handle persist, in our own session row.
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 import httpx
@@ -66,6 +67,79 @@ def _throttle(identifier: str) -> None:
     if len(_attempts) > 1000:
         for k in [k for k, v in _attempts.items() if not v or now - v[-1] > _ATTEMPT_WINDOW_S]:
             _attempts.pop(k, None)
+
+
+HANDLE_SUFFIX = ".pds.theblueai.org"
+
+
+async def create_account(handle: str, email: str, password: str,
+                         invite_code: str) -> dict[str, str]:
+    """Create an account on our PDS.
+
+    The PDS requires an invite code (PDS_INVITE_REQUIRED), which is deliberate:
+    this is a small server, not an open signup. We pass the user's code
+    straight through rather than holding admin credentials here — the
+    whiteboard has no business being able to mint accounts on its own.
+    """
+    handle = handle.strip().lstrip("@").lower()
+    if not handle:
+        raise LoginError("Pick a handle.")
+
+    # Accept "bob" or the full "bob.pds.theblueai.org"; store the full form.
+    if not handle.endswith(HANDLE_SUFFIX):
+        if "." in handle:
+            raise LoginError(f"Handles here end in {HANDLE_SUFFIX} — just type the first part.")
+        handle = handle + HANDLE_SUFFIX
+
+    local = handle[: -len(HANDLE_SUFFIX)]
+    # NB {0,30} not {1,30}: with {1,30} the optional group needs three
+    # characters, so a two-letter handle like "bo" was rejected as malformed.
+    if not (2 <= len(local) <= 32
+            and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?", local)):
+        raise LoginError(
+            "Handles can use lowercase letters, numbers and hyphens, "
+            "must start and end with a letter or number, and be 2–32 characters."
+        )
+    # Deliberately loose — the PDS does the real check by mailing it. This only
+    # catches the obvious typo. Note the local-part test: "@b.com" satisfies
+    # "has an @ and a dot after it" and is still not an address.
+    local_part, _, domain = email.strip().partition("@")
+    if not local_part or "." not in domain or domain.startswith(".") or domain.endswith("."):
+        raise LoginError("That email address doesn't look right.")
+    if len(password) < 8:
+        raise LoginError("Use a password of at least 8 characters.")
+    if not invite_code.strip():
+        raise LoginError("An invite code is required to create an account here.")
+
+    url = f"{settings.pds_url.rstrip('/')}/xrpc/com.atproto.server.createAccount"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+            resp = await client.post(url, json={
+                "handle": handle,
+                "email": email.strip(),
+                "password": password,
+                "inviteCode": invite_code.strip(),
+            })
+    except httpx.HTTPError as e:
+        log.warning("PDS unreachable during signup: %s", e)
+        raise LoginError("Could not reach the server. Try again in a moment.") from e
+
+    if resp.status_code != 200:
+        # The PDS's own messages are the useful ones here ("Handle already taken",
+        # "Invalid invite code"), so pass them through rather than flattening.
+        try:
+            detail = resp.json().get("message") or resp.json().get("error", "")
+        except Exception:
+            detail = resp.text[:200]
+        log.info("signup rejected (%s): %s", resp.status_code, detail)
+        raise LoginError(detail or f"Sign-up failed ({resp.status_code}).")
+
+    body = resp.json()
+    did = body.get("did")
+    if not did:
+        raise LoginError("The server didn't return an account id.")
+    log.info("ACCOUNT_CREATED handle=%s did=%s", body.get("handle"), did)
+    return {"did": did, "handle": body.get("handle") or handle}
 
 
 async def verify_credentials(identifier: str, password: str) -> dict[str, str]:

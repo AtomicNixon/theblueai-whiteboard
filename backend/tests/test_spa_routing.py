@@ -109,6 +109,29 @@ def test_shell_is_html_and_uncacheable(spa_client):
         "the shell names the hashed bundle; caching it strands clients on old code"
 
 
+def test_public_files_are_served_not_swallowed_by_the_spa(spa_client, tmp_path):
+    """Vite copies public/ to the root of the static dir, outside /assets.
+
+    Without an explicit check those paths hit the SPA catch-all and a portrait
+    comes back as index.html — a broken image with a 200 status.
+    """
+    import os
+    static = os.environ["WB_STATIC_DIR"]
+    os.makedirs(os.path.join(static, "img"), exist_ok=True)
+    with open(os.path.join(static, "img", "portrait.jpg"), "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0 not really a jpeg")
+
+    r = spa_client.get("/img/portrait.jpg")
+    assert r.status_code == 200
+    assert "<!doctype html" not in r.text.lower(), "a real file must not return the SPA"
+    assert r.content.startswith(b"\xff\xd8")
+
+
+def test_path_traversal_refused(spa_client):
+    r = spa_client.get("/../../etc/passwd")
+    assert "root:" not in r.text
+
+
 def test_hashed_assets_are_cached_forever(spa_client):
     """Vite content-hashes asset filenames, so a change is a new URL."""
     r = spa_client.get("/assets/index-TEST1234.js")

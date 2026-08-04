@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 from contextlib import asynccontextmanager
 
@@ -22,7 +23,7 @@ log = logging.getLogger("whiteboard")
 # Path to the built frontend.  In the Docker image this lives at /app/static.
 # For local dev the Vite dev server on :5173 serves the frontend directly,
 # so this mount only matters in production / Docker.
-_STATIC_DIR = os.environ.get("WB_STATIC_DIR", "/app/static")
+_STATIC_DIR = os.path.abspath(os.environ.get("WB_STATIC_DIR", "/app/static"))
 
 
 @asynccontextmanager
@@ -83,6 +84,24 @@ if os.path.isdir(_STATIC_DIR):
         # prefix that reaches here is an unknown endpoint.
         if full_path.startswith(_API_PREFIXES):
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such endpoint: /{full_path}")
+
+        # Anything Vite copied from public/ (images, favicon) lives at the root
+        # of the static dir rather than under /assets, so serve real files
+        # before falling back to the SPA. Without this, /img/art.jpg returns
+        # index.html and the page shows a broken image.
+        if full_path and ".." not in full_path:
+            candidate = os.path.normpath(os.path.join(_STATIC_DIR, full_path))
+            if candidate.startswith(_STATIC_DIR) and os.path.isfile(candidate):
+                # media_type is explicit for the same reason as index.html: this
+                # route's default response class would announce JSON, and a
+                # portrait served as application/json is only saved by browser
+                # content-sniffing.
+                guessed, _ = mimetypes.guess_type(candidate)
+                return FileResponse(
+                    candidate,
+                    media_type=guessed or "application/octet-stream",
+                    headers={"Cache-Control": "public, max-age=3600"},
+                )
 
         index_path = os.path.join(_STATIC_DIR, "index.html")
         if os.path.isfile(index_path):
