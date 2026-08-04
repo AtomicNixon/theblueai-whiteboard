@@ -127,6 +127,18 @@ def test_public_files_are_served_not_swallowed_by_the_spa(spa_client, tmp_path):
     assert r.content.startswith(b"\xff\xd8")
 
 
+@pytest.mark.parametrize("path", ["/", "/who", "/healthz"])
+def test_head_works_not_405(spa_client, path):
+    """`curl -I`, uptime monitors and link checkers all send HEAD.
+
+    FastAPI's @app.get registers GET only — unlike plain Starlette it does not
+    add HEAD — so these used to get a 405, and the 405's JSON body is what made
+    the HTML shell look like it was served as application/json.
+    """
+    r = spa_client.head(path)
+    assert r.status_code == 200, f"HEAD {path} should not 405"
+
+
 def test_path_traversal_refused(spa_client):
     r = spa_client.get("/../../etc/passwd")
     assert "root:" not in r.text

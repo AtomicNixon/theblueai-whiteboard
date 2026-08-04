@@ -44,8 +44,9 @@ app.add_middleware(
 )
 
 
-@app.get("/healthz")
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 async def healthz() -> dict:
+    """Liveness. HEAD too, because that's what most uptime checkers send."""
     return {"ok": True, "version": "0.1.0"}
 
 
@@ -78,7 +79,11 @@ if os.path.isdir(_STATIC_DIR):
     app.mount("/assets", _ImmutableStatic(directory=os.path.join(_STATIC_DIR, "assets")),
               name="assets")
 
-    @app.get("/{full_path:path}")
+    # HEAD as well as GET: FastAPI's @app.get registers GET only and does not
+    # add HEAD the way plain Starlette does, so `curl -I`, uptime monitors and
+    # link checkers all got a 405 on the homepage — and the 405's JSON body was
+    # what made the shell appear to be served as application/json.
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
     async def serve_spa(full_path: str):
         # The routers above claim the real API/WS routes; anything under an API
         # prefix that reaches here is an unknown endpoint.
