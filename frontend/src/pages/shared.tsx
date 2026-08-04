@@ -6,6 +6,7 @@ export const ROUTES = {
   accounts: '/accounts',
   whiteboard: '/whiteboard',
   help: '/help',
+  mcp: '/mcp',
   who: '/who',
 } as const
 
@@ -16,9 +17,10 @@ export function go(path: string) {
 
 export function Nav({ current }: { current?: string }) {
   const items: Array<[string, string]> = [
-    [ROUTES.home, 'Sign in'],
-    [ROUTES.accounts, 'About accounts'],
-    [ROUTES.help, 'About the whiteboard'],
+    [ROUTES.home, 'Home'],
+    [ROUTES.accounts, 'Accounts'],
+    [ROUTES.help, 'Whiteboard'],
+    [ROUTES.mcp, 'MCP server'],
     [ROUTES.who, 'Who we are'],
   ]
   return (

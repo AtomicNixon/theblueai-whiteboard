@@ -4,6 +4,7 @@ import CanvasView from './CanvasView'
 import Accounts from './pages/Accounts'
 import Help from './pages/Help'
 import Home from './pages/Home'
+import Mcp from './pages/Mcp'
 import Who from './pages/Who'
 import { ROUTES, go } from './pages/shared'
 import type { CanvasOut } from './types'
@@ -28,6 +29,16 @@ export default function App() {
     const onPop = () => setPath(window.location.pathname)
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
+  }, [])
+
+  // The same app answers on both theblueai.org and whiteboard.theblueai.org.
+  // On the subdomain, "/" should be the board rather than the server's front
+  // page — someone who typed whiteboard.* wants the whiteboard.
+  useEffect(() => {
+    if (window.location.pathname === ROUTES.home &&
+        window.location.hostname.startsWith('whiteboard.')) {
+      go(ROUTES.whiteboard)
+    }
   }, [])
 
   function signedIn(session: string, who: string) {
@@ -55,6 +66,7 @@ export default function App() {
 
   if (path === ROUTES.accounts) return <Accounts />
   if (path === ROUTES.help) return <Help />
+  if (path === ROUTES.mcp) return <Mcp />
   if (path === ROUTES.who) return <Who />
 
   if (path === ROUTES.whiteboard) {

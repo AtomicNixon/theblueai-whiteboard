@@ -1,16 +1,33 @@
-# Add to the existing Caddyfile on the PDS host (Caddy 2).
+# Caddy config for theblueai.org. Caddy 2.
 #
-# This is the WHOLE block. Proxy everything; do not split routes.
+# theblueai.org is the FRONT DOOR. The whiteboard and the MCP server are things
+# running behind it, not the site itself. Until 2026-08-04 the apex just 301'd
+# to a Bluesky profile and the front pages lived on the whiteboard subdomain,
+# which had the information architecture exactly one level too deep.
 
+# --- the front door -----------------------------------------------------
+# Serves the sign-in / create-account pages, the explainers, and "who we are".
+# Same backend as the whiteboard: it's one app, routed by path.
+theblueai.org, www.theblueai.org {
+	encode gzip
+	reverse_proxy 127.0.0.1:8092
+}
+
+# --- the whiteboard -----------------------------------------------------
+# Same backend. The app notices it's on the whiteboard.* hostname and sends
+# "/" straight to the board rather than the front page.
 whiteboard.theblueai.org {
 	encode gzip
 	reverse_proxy 127.0.0.1:8092
 }
 
+# NOTE — pds.theblueai.org and bsky-mcp.theblueai.org keep whatever blocks they
+# already have. Don't route them through :8092.
+
 # WHY NOT file_server
-# ------------------
-# An earlier version of this block routed /api/*, /healthz and /ws/* to the
-# backend and served everything else off disk:
+# -------------------
+# An earlier version of the whiteboard block served the frontend off disk and
+# proxied only /api/*, /healthz and /ws/*:
 #
 #     handle {
 #         root * /srv/whiteboard
@@ -18,21 +35,36 @@ whiteboard.theblueai.org {
 #         file_server
 #     }
 #
-# That works, but it puts a copy of the built frontend on the host filesystem
-# that nothing in the deploy pipeline updates. The backend image contains the
+# That works, and it puts a copy of the built frontend on the host that nothing
+# in the deploy pipeline updates. The backend image already contains the
 # frontend (backend/Dockerfile stage 1 builds it into /app/static), so after a
-# `git pull && docker compose up -d --build` the container had the new SPA and
-# Caddy kept serving the old one from /srv/whiteboard. /healthz returned 200,
-# the API behaved, and the site served six-week-old JavaScript. It went
-# unnoticed for weeks.
+# successful `git pull && docker compose up -d --build` the container had the
+# new SPA while Caddy kept serving a copy written weeks earlier. /healthz
+# returned 200 and the API behaved correctly throughout. It went unnoticed for
+# weeks.
 #
-# The backend already handles every path the split config handled by hand:
+# The backend handles every path the split config handled by hand:
 #   /api/*     -> routes.router (mounted at /api)
 #   /ws/*      -> ws_routes.router
+#   /oauth/*   -> oauth_routes.router
 #   /healthz   -> main.healthz
-#   /assets/*  -> StaticFiles mount
+#   /assets/*  -> StaticFiles mount (immutable, 1yr)
+#   /img/*     -> real files from the frontend's public/ dir
 #   everything else -> serve_spa returns index.html (the SPA fallback)
 #
 # Caddy 2 proxies WebSocket upgrades natively, so /ws/* needs no special
 # matcher. `encode gzip` is worth keeping: the bundle is ~1.3 MB uncompressed,
 # ~420 KB gzipped.
+
+# APPLYING THIS
+# -------------
+#   cp /pds/caddy/etc/caddy/Caddyfile /pds/caddy/etc/caddy/Caddyfile.bak-$(date +%F)
+#   # replace the old theblueai.org redirect block and the whiteboard block
+#   docker exec caddy caddy validate --config /etc/caddy/Caddyfile
+#   docker exec caddy caddy reload  --config /etc/caddy/Caddyfile
+#
+# Validate before reloading: that one file also fronts the PDS and bsky-mcp, so
+# a syntax error takes all three down rather than just this.
+#
+# DNS: theblueai.org and www both need A records pointing at the VPS, grey
+# cloud (DNS only) so Caddy can complete the ACME challenge itself.
