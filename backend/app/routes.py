@@ -5,7 +5,7 @@ import logging
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import db, ws
@@ -13,6 +13,7 @@ from .ai_trigger import extract_tags, schedule_ai_tagged
 from .auth import S2S_ACTOR_HEADER, S2S_SECRET_HEADER, AuthError, authenticate
 from .elements import is_ephemeral, normalize, strip_for_storage
 from .models import CanvasCreate, ElementIn, ElementsIn, ElementUpdate, FileIn
+from .render import render_elements
 from .serializers import canvas_out, element_out
 
 log = logging.getLogger("whiteboard.http")
@@ -161,6 +162,22 @@ async def get_snapshot(user: UserDep, canvas_id: str) -> dict:
         "files": await db.get_files(canvas_id),
         "me": user["did"],
     }
+
+
+@router.get("/canvases/{canvas_id}/render")
+async def render_canvas(user: UserDep, canvas_id: str) -> Response:
+    """PNG rasterization of the current elements, cropped to their bounding box.
+
+    Exists so a client with no way to paint a browser canvas — an AI agent
+    reading `snapshot`'s element JSON — can see what it actually drew instead
+    of only what it specified. Same auth as the other read endpoints; no
+    separate permission tier.
+    """
+    snap = await db.get_canvas_snapshot(canvas_id)
+    if snap is None:
+        raise HTTPException(404, "canvas not found")
+    png = render_elements([e["data"] for e in snap["elements"]])
+    return Response(content=png, media_type="image/png")
 
 
 # --- Elements ---

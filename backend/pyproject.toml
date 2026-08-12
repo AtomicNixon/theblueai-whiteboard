@@ -19,6 +19,8 @@ dependencies = [
     # Without it we fall back to the HTTPS well-known, which every account on
     # pds.theblueai.org publishes.
     "dnspython>=2.6.0",
+    # Server-side rasterization for GET /canvases/{id}/render.
+    "pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
